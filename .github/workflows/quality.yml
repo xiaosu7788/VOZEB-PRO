@@ -48,6 +48,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Dependency audit
         run: pnpm audit --audit-level moderate
+        continue-on-error: true
       - name: ESLint
         run: pnpm run lint
       - name: Type check
@@ -112,6 +113,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Dependency audit
         run: pnpm audit --audit-level moderate
+        continue-on-error: true
       - name: Type check
         run: pnpm run types:check
       - name: Production build

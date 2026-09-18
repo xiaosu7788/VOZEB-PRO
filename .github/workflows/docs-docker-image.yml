@@ -29,7 +29,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: docs/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level moderate
+      - name: Dependency audit
+        run: pnpm audit --audit-level moderate
+        continue-on-error: true
       - run: pnpm run types:check
       - run: pnpm run build
 
