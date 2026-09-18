@@ -1,4 +1,4 @@
-export type PaymentProviderId = "stripe" | "alipay" | "wechat" | "payply" | "manual";
+export type PaymentProviderId = "stripe" | "alipay" | "wechat" | "payply" | "dulupay" | "manual";
 
 export const ALIPAY_PAYMENT_MODES = ["official", "face_to_face"] as const;
 export type AlipayPaymentMode = (typeof ALIPAY_PAYMENT_MODES)[number];
@@ -327,6 +327,83 @@ export const PAYMENT_PROVIDER_DEFINITIONS: PaymentProviderDefinition[] = [
             { key: "webhookAmountYuanField", label: "金额元字段", kind: "text", envNames: ["VOZEB_PRO_PAYPLY_WEBHOOK_AMOUNT_YUAN_FIELD"], placeholder: "data.amount", advanced: true },
             { key: "webhookCurrencyField", label: "币种字段", kind: "text", envNames: ["VOZEB_PRO_PAYPLY_WEBHOOK_CURRENCY_FIELD"], placeholder: "data.currency", advanced: true },
             { key: "webhookPaidAtField", label: "支付时间字段", kind: "text", envNames: ["VOZEB_PRO_PAYPLY_WEBHOOK_PAID_AT_FIELD"], placeholder: "data.paidAt", advanced: true },
+        ],
+    },
+    {
+        id: "dulupay",
+        name: "嘟噜支付",
+        description: "嘟噜支付 V2 聚合接口，支持支付宝与微信支付，使用商户私钥签名和平台公钥验签。",
+        checkoutKind: "跳转支付 / 扫码支付",
+        checkoutFieldKeys: ["pid", "privateKey"],
+        webhookFieldKeys: ["pid", "publicKey"],
+        fields: [
+            { key: "pid", label: "商户 ID", kind: "text", required: true, envNames: ["VOZEB_PRO_DULUPAY_PID"], placeholder: "1001" },
+            {
+                key: "privateKey",
+                label: "商户私钥",
+                kind: "textarea",
+                secret: true,
+                required: true,
+                any: true,
+                envNames: ["VOZEB_PRO_DULUPAY_PRIVATE_KEY", "VOZEB_PRO_DULUPAY_PRIVATE_KEY_PATH"],
+                placeholder: "可粘贴商户 RSA 私钥内容；服务器路径建议仍放环境变量。",
+                note: "在嘟噜支付商户后台的“个人资料 → API 信息”生成 RSA 密钥对后填写。",
+            },
+            { key: "publicKey", label: "平台公钥", kind: "textarea", secret: true, required: true, any: true, envNames: ["VOZEB_PRO_DULUPAY_PUBLIC_KEY", "VOZEB_PRO_DULUPAY_PUBLIC_KEY_PATH"], placeholder: "嘟噜支付平台公钥，用于接口返回与回调验签" },
+            {
+                key: "method",
+                label: "接口类型",
+                kind: "select",
+                defaultValue: "web",
+                envNames: ["VOZEB_PRO_DULUPAY_METHOD"],
+                options: [
+                    { label: "通用网页支付", value: "web" },
+                    { label: "跳转支付", value: "jump" },
+                ],
+                note: "通用网页支付会根据设备类型自动返回跳转地址或二维码；跳转支付只返回跳转地址。",
+            },
+            {
+                key: "type",
+                label: "支付方式",
+                kind: "select",
+                defaultValue: "alipay",
+                envNames: ["VOZEB_PRO_DULUPAY_TYPE"],
+                options: [
+                    { label: "支付宝", value: "alipay" },
+                    { label: "微信支付", value: "wxpay" },
+                ],
+            },
+            {
+                key: "device",
+                label: "设备类型",
+                kind: "select",
+                envNames: ["VOZEB_PRO_DULUPAY_DEVICE"],
+                placeholder: "pc",
+                options: [
+                    { label: "电脑浏览器", value: "pc" },
+                    { label: "手机浏览器", value: "mobile" },
+                    { label: "微信内浏览器", value: "wechat" },
+                    { label: "支付宝客户端", value: "alipay" },
+                ],
+                note: "仅通用网页支付需要；留空默认按电脑浏览器处理。",
+                advanced: true,
+            },
+            { key: "gatewayUrl", label: "网关地址", kind: "url", envNames: ["VOZEB_PRO_DULUPAY_GATEWAY_URL"], placeholder: "https://api.dulupay.com", advanced: true },
+            { key: "notifyUrl", label: "异步回调地址", kind: "url", envNames: ["VOZEB_PRO_DULUPAY_NOTIFY_URL"], placeholder: "默认 /api/billing/webhooks/dulupay", advanced: true },
+            { key: "returnUrl", label: "同步返回地址", kind: "url", envNames: ["VOZEB_PRO_DULUPAY_RETURN_URL"], placeholder: "默认 /billing/success", advanced: true },
+            {
+                key: "refundEnabled",
+                label: "启用退款接口",
+                kind: "select",
+                defaultValue: "disabled",
+                envNames: ["VOZEB_PRO_DULUPAY_REFUND_ENABLED"],
+                options: [
+                    { label: "未开启", value: "disabled" },
+                    { label: "已开启", value: "enabled" },
+                ],
+                note: "需先在嘟噜支付商户后台开启订单退款 API 开关，未开启时后台不会直接标记订单为已退款。",
+                advanced: true,
+            },
         ],
     },
     {

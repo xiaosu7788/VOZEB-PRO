@@ -43,6 +43,9 @@ const config: PaymentRuntimeConfig = {
 const alipayKeyPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const alipayPrivateKey = alipayKeyPair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 const alipayPublicKey = alipayKeyPair.publicKey.export({ type: "spki", format: "pem" }).toString();
+const dulupayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const dulupayPrivateKey = dulupayKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+const dulupayPublicKey = dulupayKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
 
 describe("payment checkout providers", () => {
     beforeEach(() => vi.unstubAllGlobals());
@@ -159,6 +162,83 @@ describe("payment checkout providers", () => {
 
         await expect(createProviderCheckout("alipay", { ...order, provider: "alipay", currency: "CNY" }, {}, alipayConfig("face_to_face"))).rejects.toThrow("支付宝当面付响应验签失败");
     });
+
+    it("maps Dulupay pay_type values to redirect, QR and form checkouts", async () => {
+        for (const [payType, expected] of [
+            ["jump", { kind: "redirect", url: "https://pay.dulupay.test/jump" }],
+            ["qrcode", { kind: "qr", qrContent: "https://pay.dulupay.test/jump" }],
+            ["html", { kind: "form" }],
+        ] as const) {
+            const payInfo = payType === "html" ? '<form action="https://pay.dulupay.test/form" method="POST"><input name="token" value="fixture" /></form>' : "https://pay.dulupay.test/jump";
+            vi.stubGlobal(
+                "fetch",
+                vi.fn(async () => signedDulupayResponse({ code: 0, trade_no: "dulupay_trade", pay_type: payType, pay_info: payInfo })),
+            );
+
+            const checkout = await createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "CNY" }, { clientIp: "203.0.113.10" }, dulupayConfig());
+            expect(checkout).toMatchObject({ providerOrderId: "dulupay_trade", ...expected });
+        }
+    });
+
+    it("rejects Dulupay orders without a client IP and non-CNY orders before requesting upstream", async () => {
+        const fetchMock = vi.fn();
+        vi.stubGlobal("fetch", fetchMock);
+
+        await expect(createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "CNY" }, {}, dulupayConfig())).rejects.toThrow("无法确定下单用户 IP");
+        await expect(createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "USD" }, { clientIp: "203.0.113.10" }, dulupayConfig())).rejects.toThrow("嘟噜支付仅支持人民币 CNY 订单");
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a Dulupay checkout response changed after signing", async () => {
+        const response = signedDulupayResponse({ code: 0, trade_no: "dulupay_trade", pay_type: "qrcode", pay_info: "https://pay.dulupay.test/order-one" });
+        const rawBody = (await response.text()).replace("order-one", "changed-order");
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => new Response(rawBody, { headers: { "content-type": "application/json" } })),
+        );
+
+        await expect(createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "CNY" }, { clientIp: "203.0.113.10" }, dulupayConfig())).rejects.toThrow("嘟噜支付下单响应验签失败");
+    });
+
+    it("rejects unsupported Dulupay pay types with an actionable message", async () => {
+        for (const [payType, payInfo] of [
+            ["jsapi", '{"appId":"wx"}'],
+            ["urlscheme", "weixin://wxpay/bizpayurl?pr=fixture"],
+            ["app", "{}"],
+        ] as const) {
+            vi.stubGlobal(
+                "fetch",
+                vi.fn(async () => signedDulupayResponse({ code: 0, trade_no: "dulupay_trade", pay_type: payType, pay_info: payInfo })),
+            );
+
+            await expect(createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "CNY" }, { clientIp: "203.0.113.10" }, dulupayConfig())).rejects.toThrow("嘟噜支付返回的发起支付类型不受支持");
+        }
+    });
+
+    it("truncates the Dulupay product name by code point so emoji never break the signature", async () => {
+        const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => signedDulupayResponse({ code: 0, trade_no: "dulupay_trade", pay_type: "qrcode", pay_info: "https://pay.dulupay.test/qr" }));
+        vi.stubGlobal("fetch", fetchMock);
+        // 127 个 emoji 共 254 个 UTF-16 码元，按码点截断必须保留完整代理对。
+        const subject = "😀".repeat(127);
+
+        await createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "CNY", subject }, { clientIp: "203.0.113.10" }, dulupayConfig());
+
+        const body = new URLSearchParams(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+        const name = body.get("name") || "";
+        expect(Array.from(name)).toHaveLength(127);
+        expect(name).toBe(subject);
+        expect(name.isWellFormed()).toBe(true);
+    });
+
+    it("rejects invalid Dulupay method and type configuration instead of silently defaulting", async () => {
+        const fetchMock = vi.fn();
+        vi.stubGlobal("fetch", fetchMock);
+        const options = { clientIp: "203.0.113.10" };
+
+        await expect(createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "CNY" }, options, dulupayConfig({ VOZEB_PRO_DULUPAY_METHOD: "wap" }))).rejects.toThrow("嘟噜支付接口类型配置无效");
+        await expect(createProviderCheckout("dulupay", { ...order, provider: "dulupay", currency: "CNY" }, options, dulupayConfig({ VOZEB_PRO_DULUPAY_TYPE: "wx" }))).rejects.toThrow("嘟噜支付方式配置无效");
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
 });
 
 function alipayConfig(mode = "official"): PaymentRuntimeConfig {
@@ -179,6 +259,30 @@ function signedAlipayResponse(payload: { alipay_trade_precreate_response: Record
     const signContent = JSON.stringify(payload.alipay_trade_precreate_response);
     const sign = createSign("RSA-SHA256").update(signContent, "utf8").sign(alipayPrivateKey, "base64");
     return new Response(JSON.stringify({ ...payload, sign }), { headers: { "content-type": "application/json" } });
+}
+
+function dulupayConfig(overrides: Record<string, string> = {}): PaymentRuntimeConfig {
+    return {
+        saved: { providers: {} },
+        providers: { dulupay: { enabled: true, saved: true } },
+        valuesByEnvName: {
+            VOZEB_PRO_DULUPAY_PID: "1001",
+            VOZEB_PRO_DULUPAY_PRIVATE_KEY: dulupayPrivateKey,
+            VOZEB_PRO_DULUPAY_PUBLIC_KEY: dulupayPublicKey,
+            VOZEB_PRO_DULUPAY_GATEWAY_URL: "https://api.dulupay.test",
+            ...overrides,
+        },
+    };
+}
+
+function signedDulupayResponse(payload: Record<string, unknown>) {
+    const content = Object.keys(payload)
+        .filter((key) => payload[key] !== "" && payload[key] !== undefined && payload[key] !== null)
+        .sort()
+        .map((key) => `${key}=${payload[key]}`)
+        .join("&");
+    const sign = createSign("RSA-SHA256").update(content, "utf8").sign(dulupayPrivateKey, "base64");
+    return new Response(JSON.stringify({ ...payload, sign_type: "RSA", sign }), { headers: { "content-type": "application/json" } });
 }
 
 function verifyAlipayRequestSignature(body: URLSearchParams) {

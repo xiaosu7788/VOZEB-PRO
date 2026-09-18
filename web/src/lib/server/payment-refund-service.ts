@@ -5,7 +5,7 @@ import { normalizePaymentProvider } from "@/lib/payment-provider";
 import { BillingInputError } from "@/lib/server/billing-errors";
 import type { BillingOrderRecord, JsonValue, PaymentTransactionRecord } from "@/lib/server/database";
 import { getPaymentRuntimeConfig, getPaymentRuntimeEnv, getPaymentRuntimeValue, type PaymentRuntimeConfig } from "@/lib/server/payment-config-store";
-import { loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
+import { buildRsaSignatureContent, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 
 export type PaymentRefundStatus = "succeeded" | "pending" | "manual";
@@ -32,6 +32,7 @@ export async function refundPaymentTransaction(order: BillingOrderRecord, paymen
     if (provider === "alipay") return refundAlipayPayment(order, payment, options, paymentConfig);
     if (provider === "wechat") return refundWechatPayment(order, payment, options, paymentConfig);
     if (provider === "payply") return refundPayplyPayment(order, payment, options, paymentConfig);
+    if (provider === "dulupay") return refundDulupayPayment(order, payment, paymentConfig);
     throw new BillingInputError("该支付渠道未接入自动退款，不能直接标记本地退款", 409);
 }
 
@@ -44,6 +45,7 @@ export async function reconcilePaymentRefund(order: BillingOrderRecord, payment:
         const queried = await queryPayplyRefund(order, payment, current, config);
         if (queried) return queried;
     }
+    if (current.provider === "dulupay") return queryDulupayRefund(order, payment, current, config);
     return refundPaymentTransaction(order, payment, options);
 }
 
@@ -195,6 +197,90 @@ async function refundPayplyPayment(order: BillingOrderRecord, payment: PaymentTr
         providerRefundId: normalizeOptionalText(readConfiguredPath(paymentConfig, payload, "VOZEB_PRO_PAYPLY_REFUND_ID_FIELD", ["refundId", "refund_id", "id", "data.refundId", "data.refund_id", "data.id", "result.id"]), 160),
         rawPayload: sanitizeJson(payload),
     };
+}
+
+async function refundDulupayPayment(order: BillingOrderRecord, payment: PaymentTransactionRecord, paymentConfig: PaymentRuntimeConfig): Promise<PaymentRefundResult> {
+    if (getPaymentRuntimeEnv(paymentConfig, "VOZEB_PRO_DULUPAY_REFUND_ENABLED") !== "enabled") {
+        throw new BillingInputError("嘟噜支付退款接口未开启，请先在嘟噜支付商户后台开启订单退款 API 开关并在本站支付渠道配置中启用", 400);
+    }
+    const pid = requiredConfig(paymentConfig, "VOZEB_PRO_DULUPAY_PID");
+    const privateKey = loadPrivateKey(paymentConfig, "VOZEB_PRO_DULUPAY_PRIVATE_KEY", "VOZEB_PRO_DULUPAY_PRIVATE_KEY_PATH");
+    const tradeNo = normalizeProviderTradeNo(payment.providerTradeId, order);
+    const params: Record<string, string> = {
+        pid,
+        out_refund_no: providerRefundRequestNo(order),
+        money: centsToDecimal(order.amountCents),
+        timestamp: Math.floor(Date.now() / 1000).toString(),
+        sign_type: "RSA",
+    };
+    if (tradeNo) params.trade_no = tradeNo;
+    else params.out_trade_no = order.orderNo;
+    params.sign = signDulupayParams(params, privateKey);
+
+    const response = await fetchSafeOutbound(`${dulupayGateway(paymentConfig)}/api/pay/refund`, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(params),
+        signal: AbortSignal.timeout(20_000),
+    });
+    const payload = parseJsonObject(await response.text());
+    if (!response.ok) throw new BillingInputError(readDulupayError(payload, "嘟噜支付退款失败"), response.status >= 500 ? 502 : 400);
+    if (normalizeText(payload.code, "", 20) !== "0") throw new BillingInputError(readDulupayError(payload, "嘟噜支付退款失败"), 400);
+    const sign = normalizeText(payload.sign, "", 2000);
+    if (!sign || !verifyRsaSha256(buildRsaSignatureContent(payload), sign, loadPaymentPublicKey(paymentConfig, "VOZEB_PRO_DULUPAY_PUBLIC_KEY", "VOZEB_PRO_DULUPAY_PUBLIC_KEY_PATH"))) {
+        throw new BillingInputError("嘟噜支付退款响应验签失败", 502);
+    }
+    const refundNo = normalizeOptionalText(payload.refund_no, 160);
+    if (!refundNo) throw new BillingInputError("嘟噜支付未返回平台退款单号", 502);
+    return { provider: "dulupay", status: "succeeded", providerRefundId: refundNo, rawPayload: sanitizeJson(payload) };
+}
+
+async function queryDulupayRefund(order: BillingOrderRecord, payment: PaymentTransactionRecord, current: PaymentRefundResult, paymentConfig: PaymentRuntimeConfig): Promise<PaymentRefundResult> {
+    const pid = requiredConfig(paymentConfig, "VOZEB_PRO_DULUPAY_PID");
+    const privateKey = loadPrivateKey(paymentConfig, "VOZEB_PRO_DULUPAY_PRIVATE_KEY", "VOZEB_PRO_DULUPAY_PRIVATE_KEY_PATH");
+    const tradeNo = normalizeProviderTradeNo(payment.providerTradeId, order);
+    const params: Record<string, string> = { pid, timestamp: Math.floor(Date.now() / 1000).toString(), sign_type: "RSA" };
+    if (tradeNo) params.trade_no = tradeNo;
+    else params.out_trade_no = order.orderNo;
+    params.sign = signDulupayParams(params, privateKey);
+
+    const response = await fetchSafeOutbound(`${dulupayGateway(paymentConfig)}/api/pay/query`, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(params),
+        signal: AbortSignal.timeout(20_000),
+    });
+    const payload = parseJsonObject(await response.text());
+    if (!response.ok) throw new BillingInputError(readDulupayError(payload, "嘟噜支付订单查询失败"), response.status >= 500 ? 502 : 400);
+    if (normalizeText(payload.code, "", 20) !== "0") throw new BillingInputError(readDulupayError(payload, "嘟噜支付订单查询失败"), 400);
+    const sign = normalizeText(payload.sign, "", 2000);
+    if (!sign || !verifyRsaSha256(buildRsaSignatureContent(payload), sign, loadPaymentPublicKey(paymentConfig, "VOZEB_PRO_DULUPAY_PUBLIC_KEY", "VOZEB_PRO_DULUPAY_PUBLIC_KEY_PATH"))) {
+        throw new BillingInputError("嘟噜支付订单查询响应验签失败", 502);
+    }
+    const status = normalizeDulupayRefundStatus(payload.status);
+    if (!status) throw new BillingInputError(`嘟噜支付订单状态异常：${normalizeText(payload.status, "unknown", 20)}`, 502);
+    return { provider: "dulupay", status, providerRefundId: current.providerRefundId, rawPayload: sanitizeJson(payload) };
+}
+
+// 嘟噜支付订单查询的 status：0 未支付、1 已支付、2 已退款、3 已冻结、4 预授权。
+// 退款对账时只有 2 代表退款完成，其余状态说明退款仍在处理中，不能当成失败。
+function normalizeDulupayRefundStatus(value: unknown): Exclude<PaymentRefundStatus, "manual"> | undefined {
+    const status = normalizeText(value, "", 20);
+    if (status === "2") return "succeeded";
+    if (["0", "1", "3", "4"].includes(status)) return "pending";
+    return undefined;
+}
+
+function signDulupayParams(params: Record<string, string>, privateKey: string) {
+    return createSign("RSA-SHA256").update(buildRsaSignatureContent(params), "utf8").sign(privateKey, "base64");
+}
+
+function dulupayGateway(config: PaymentRuntimeConfig) {
+    return (getPaymentRuntimeEnv(config, "VOZEB_PRO_DULUPAY_GATEWAY_URL") || "https://api.dulupay.com").replace(/\/+$/, "");
+}
+
+function readDulupayError(payload: Record<string, unknown>, fallback: string) {
+    return normalizeText(payload.msg || payload.message || payload.error, fallback, 300);
 }
 
 async function queryStripeRefund(refundId: string, config: PaymentRuntimeConfig): Promise<PaymentRefundResult> {

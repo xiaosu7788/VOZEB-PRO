@@ -20,7 +20,21 @@ vi.mock("@/lib/server/payment-config-store", () => ({
 }));
 vi.mock("@/lib/server/safe-outbound-fetch", () => ({ fetchSafeOutbound: (url: string | URL, init?: RequestInit) => fetch(url, init) }));
 
-import { refundPaymentTransaction } from "./payment-refund-service";
+import { reconcilePaymentRefund, refundPaymentTransaction } from "./payment-refund-service";
+
+const dulupayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const dulupayPrivateKey = dulupayKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+const dulupayPublicKey = dulupayKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+
+function signedDulupayResponse(payload: Record<string, unknown>) {
+    const content = Object.keys(payload)
+        .filter((key) => payload[key] !== "" && payload[key] !== undefined && payload[key] !== null)
+        .sort()
+        .map((key) => `${key}=${payload[key]}`)
+        .join("&");
+    const sign = createSign("RSA-SHA256").update(content, "utf8").sign(dulupayPrivateKey, "base64");
+    return Response.json({ ...payload, sign_type: "RSA", sign });
+}
 
 const order = {
     id: "order-one",
@@ -282,6 +296,75 @@ describe("payment refunds", () => {
         );
     });
 
+    it("creates a Dulupay refund and keeps the provider refund id during reconciliation", async () => {
+        mocks.runtimeConfig.valuesByEnvName = {
+            VOZEB_PRO_DULUPAY_PID: "1001",
+            VOZEB_PRO_DULUPAY_PRIVATE_KEY: dulupayPrivateKey,
+            VOZEB_PRO_DULUPAY_PUBLIC_KEY: dulupayPublicKey,
+            VOZEB_PRO_DULUPAY_GATEWAY_URL: "https://api.dulupay.test",
+            VOZEB_PRO_DULUPAY_REFUND_ENABLED: "enabled",
+        };
+        const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => signedDulupayResponse({ code: 0, msg: "退款成功", refund_no: "dulupay_refund_001", trade_no: "dulupay_trade_001", money: "12.99" }));
+        vi.stubGlobal("fetch", fetchMock);
+
+        const refunded = await refundPaymentTransaction({ ...order, provider: "dulupay", currency: "CNY" }, { ...payment, provider: "dulupay", providerTradeId: "dulupay_trade_001" });
+
+        expect(refunded).toMatchObject({ provider: "dulupay", status: "succeeded", providerRefundId: "dulupay_refund_001" });
+        const body = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams;
+        const payload = new URLSearchParams(String(body));
+        expect(payload.get("pid")).toBe("1001");
+        expect(payload.get("trade_no")).toBe("dulupay_trade_001");
+        expect(payload.get("out_refund_no")).toBe("vozeb-pro-refund-order-one");
+        expect(payload.get("money")).toBe("12.99");
+        expect(payload.get("sign_type")).toBe("RSA");
+        expect(payload.get("sign")).toBeTruthy();
+    });
+
+    it("maps Dulupay query status to refund progress without treating a paid order as a failure", async () => {
+        mocks.runtimeConfig.valuesByEnvName = {
+            VOZEB_PRO_DULUPAY_PID: "1001",
+            VOZEB_PRO_DULUPAY_PRIVATE_KEY: dulupayPrivateKey,
+            VOZEB_PRO_DULUPAY_PUBLIC_KEY: dulupayPublicKey,
+            VOZEB_PRO_DULUPAY_GATEWAY_URL: "https://api.dulupay.test",
+        };
+        const current = { provider: "dulupay", status: "pending" as const, providerRefundId: "dulupay_refund_001" };
+        const dulupayOrder = { ...order, provider: "dulupay", currency: "CNY" };
+        const dulupayPayment = { ...payment, provider: "dulupay", providerTradeId: "dulupay_trade_001" };
+
+        for (const [status, expected] of [
+            ["2", "succeeded"],
+            ["1", "pending"],
+            ["0", "pending"],
+            ["3", "pending"],
+            ["4", "pending"],
+        ] as const) {
+            vi.stubGlobal(
+                "fetch",
+                vi.fn(async () => signedDulupayResponse({ code: 0, status, trade_no: "dulupay_trade_001" })),
+            );
+            await expect(reconcilePaymentRefund(dulupayOrder, dulupayPayment, current)).resolves.toMatchObject({ provider: "dulupay", status: expected, providerRefundId: "dulupay_refund_001" });
+        }
+
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => signedDulupayResponse({ code: 0, status: "9", trade_no: "dulupay_trade_001" })),
+        );
+        await expect(reconcilePaymentRefund(dulupayOrder, dulupayPayment, current)).rejects.toThrow("嘟噜支付订单状态异常");
+    });
+
+    it("blocks Dulupay refunds until the merchant refund API switch is enabled", async () => {
+        mocks.runtimeConfig.valuesByEnvName = {
+            VOZEB_PRO_DULUPAY_PID: "1001",
+            VOZEB_PRO_DULUPAY_PRIVATE_KEY: dulupayPrivateKey,
+            VOZEB_PRO_DULUPAY_PUBLIC_KEY: dulupayPublicKey,
+            VOZEB_PRO_DULUPAY_GATEWAY_URL: "https://api.dulupay.test",
+        };
+        const fetchMock = vi.fn();
+        vi.stubGlobal("fetch", fetchMock);
+
+        await expect(refundPaymentTransaction({ ...order, provider: "dulupay", currency: "CNY" }, { ...payment, provider: "dulupay" })).rejects.toThrow("嘟噜支付退款接口未开启");
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
     it("uses BillingInputError for providers without automatic refund support", async () => {
         await expect(refundPaymentTransaction({ ...order, provider: "unknown-pay" }, { ...payment, provider: "unknown-pay" })).rejects.toBeInstanceOf(BillingInputError);
     });

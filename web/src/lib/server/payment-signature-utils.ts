@@ -12,6 +12,14 @@ export function verifyRsaSha256(content: string, signature: string, publicKey: s
     }
 }
 
+export function buildRsaSignatureContent(params: Record<string, unknown>, excludedKeys: string[] = ["sign", "sign_type"]) {
+    return Object.keys(params)
+        .filter((key) => !excludedKeys.includes(key) && params[key] !== "" && params[key] !== undefined && params[key] !== null)
+        .sort()
+        .map((key) => `${key}=${String(params[key])}`)
+        .join("&");
+}
+
 export function loadPaymentPublicKey(paymentConfig: PaymentRuntimeConfig, valueEnv: string, pathEnv: string, certificateEnv?: string, certificatePathEnv?: string) {
     const direct = getPaymentRuntimeEnv(paymentConfig, valueEnv) || (certificateEnv ? getPaymentRuntimeEnv(paymentConfig, certificateEnv) : "");
     if (direct) return normalizePublicKey(direct);

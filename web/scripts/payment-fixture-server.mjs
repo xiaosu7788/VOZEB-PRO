@@ -1,4 +1,4 @@
-import { createSign } from "node:crypto";
+import { createSign, createVerify } from "node:crypto";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 
@@ -41,6 +41,9 @@ async function handlePaymentRequest({ request, response, url, body, options }) {
     if (url.pathname === "/wechat/v3/refund/domestic/refunds") return sendSignedWechat(response, { refund_id: "wx_refund_fixture", status: "SUCCESS" }, options.wechatPrivateKey);
     if (url.pathname === "/payply/checkout") return sendJson(response, 200, { data: { paymentUrl: "https://checkout.fixture/payply", tradeId: "payply_trade_fixture", paymentId: "payply_payment_fixture" } });
     if (url.pathname === "/payply/refund") return sendJson(response, 200, { data: { status: "success", refundId: "payply_refund_fixture" } });
+    if (url.pathname === "/dulupay/api/pay/create") return handleDulupayCreate(response, body, options);
+    if (url.pathname === "/dulupay/api/pay/query") return handleDulupayQuery(response, body, options);
+    if (url.pathname === "/dulupay/api/pay/refund") return handleDulupayRefund(response, body, options);
     if (url.pathname === "/alipay/gateway.do") return handleAlipay(response, body, options.alipayPrivateKey);
     return sendJson(response, 404, { error: { message: `payment fixture route not found: ${url.pathname}` } });
 }
@@ -100,9 +103,72 @@ function sendJson(response, status, value, headers = {}) {
     response.end(bytes);
 }
 
+function handleDulupayCreate(response, body, options) {
+    if (!options.dulupayPrivateKey) throw new Error("Dulupay fixture private key is required");
+    const params = verifyDulupayRequest(body, options);
+    return sendSignedDulupay(response, options.dulupayPrivateKey, { code: 0, trade_no: "dulupay_trade_fixture", pay_type: "qrcode", pay_info: "https://checkout.fixture/dulupay-qr", out_trade_no: params.out_trade_no });
+}
+
+function handleDulupayQuery(response, body, options) {
+    if (!options.dulupayPrivateKey) throw new Error("Dulupay fixture private key is required");
+    const params = verifyDulupayRequest(body, options);
+    return sendSignedDulupay(response, options.dulupayPrivateKey, {
+        code: 0,
+        trade_no: params.trade_no || "dulupay_trade_fixture",
+        out_trade_no: params.out_trade_no || "VZ-LIVE-001",
+        api_trade_no: "dulupay_api_trade_fixture",
+        type: "alipay",
+        status: 1,
+        money: "12.99",
+        endtime: "2026-07-01 16:49:24",
+    });
+}
+
+function handleDulupayRefund(response, body, options) {
+    if (!options.dulupayPrivateKey) throw new Error("Dulupay fixture private key is required");
+    const params = verifyDulupayRequest(body, options);
+    return sendSignedDulupay(response, options.dulupayPrivateKey, {
+        code: 0,
+        msg: "退款成功",
+        refund_no: "dulupay_refund_fixture",
+        out_refund_no: params.out_refund_no || "",
+        trade_no: params.trade_no || "dulupay_trade_fixture",
+        money: params.money || "12.99",
+    });
+}
+
+function sendSignedDulupay(response, privateKey, payload) {
+    const content = Object.keys(payload)
+        .filter((key) => payload[key] !== "" && payload[key] !== undefined && payload[key] !== null)
+        .sort()
+        .map((key) => `${key}=${payload[key]}`)
+        .join("&");
+    const sign = createSign("RSA-SHA256").update(content, "utf8").sign(privateKey, "base64");
+    sendJson(response, 200, { ...payload, sign_type: "RSA", sign });
+}
+
+// 用请求携带的公钥验证商户签名，确保测试能真正证明签名串与发送内容一致。
+function verifyDulupayRequest(body, options) {
+    const params = Object.fromEntries(new URLSearchParams(body.toString("utf8")).entries());
+    const sign = params.sign;
+    if (!sign) throw new Error("Dulupay fixture request is missing sign");
+    if (!options.dulupayPublicKey) throw new Error("Dulupay fixture public key is required to verify requests");
+    const content = Object.keys(params)
+        .filter((key) => key !== "sign" && key !== "sign_type" && params[key] !== "")
+        .sort()
+        .map((key) => `${key}=${params[key]}`)
+        .join("&");
+    const valid = createVerify("RSA-SHA256").update(content, "utf8").verify(options.dulupayPublicKey, sign, "base64");
+    if (!valid) throw new Error("Dulupay fixture request signature is invalid");
+    return params;
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
     const port = Number(process.env.VOZEB_PRO_PAYMENT_FIXTURE_PORT) || 4020;
     const host = process.env.VOZEB_PRO_PAYMENT_FIXTURE_HOST || "127.0.0.1";
-    const fixture = createPaymentFixtureServer({ alipayPrivateKey: process.env.VOZEB_PRO_PAYMENT_FIXTURE_ALIPAY_PRIVATE_KEY });
+    const fixture = createPaymentFixtureServer({
+        alipayPrivateKey: process.env.VOZEB_PRO_PAYMENT_FIXTURE_ALIPAY_PRIVATE_KEY,
+        dulupayPublicKey: process.env.VOZEB_PRO_PAYMENT_FIXTURE_DULUPAY_PUBLIC_KEY,
+    });
     fixture.server.listen(port, host, () => console.log(`Payment fixture ready at http://${host}:${port}`));
 }

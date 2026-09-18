@@ -7,6 +7,10 @@ const PAYMENT_PROVIDER_ALIASES: Record<string, string> = {
     weixin: "wechat",
     "pay-ply": "payply",
     pay_ply: "payply",
+    dulu: "dulupay",
+    dulu_pay: "dulupay",
+    "dulu-pay": "dulupay",
+    dulupay: "dulupay",
 };
 
 export function normalizePaymentProvider(value: unknown, fallback = "manual") {

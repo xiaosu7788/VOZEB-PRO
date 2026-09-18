@@ -31,6 +31,9 @@ const wechatPrivateKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).pri
 const wechatPlatformKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const wechatPlatformPrivateKey = wechatPlatformKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 const wechatPlatformPublicKey = wechatPlatformKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+const dulupayKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const dulupayPrivateKey = dulupayKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+const dulupayPublicKey = dulupayKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
 
 const order = {
     id: "order-live",
@@ -79,7 +82,7 @@ let origin: string;
 beforeEach(async () => {
     vi.stubEnv("VOZEB_PRO_ALLOW_PRIVATE_UPSTREAMS", "1");
     vi.stubEnv("VOZEB_PRO_PRIVATE_UPSTREAM_HOSTS", "127.0.0.1");
-    fixture = createPaymentFixtureServer({ alipayPrivateKey, wechatPrivateKey: wechatPlatformPrivateKey });
+    fixture = createPaymentFixtureServer({ alipayPrivateKey, wechatPrivateKey: wechatPlatformPrivateKey, dulupayPrivateKey, dulupayPublicKey });
     await new Promise<void>((resolve) => fixture.server.listen(0, "127.0.0.1", resolve));
     const address = fixture.server.address();
     if (!address || typeof address === "string") throw new Error("Payment fixture did not bind a TCP port");
@@ -92,23 +95,31 @@ afterEach(async () => {
 });
 
 describe("payment providers over a live compatible HTTP fixture", () => {
-    it("creates Stripe, Alipay, WeChat and PayPly checkouts", async () => {
+    it("creates Stripe, Alipay, WeChat, PayPly and Dulupay checkouts", async () => {
         const stripe = await createProviderCheckout("stripe", order, { origin: "https://app.test" }, config({ VOZEB_PRO_STRIPE_SECRET_KEY: "stripe-secret", VOZEB_PRO_STRIPE_API_BASE: `${origin}/stripe` }));
         const alipay = await createProviderCheckout("alipay", { ...order, provider: "alipay" }, { origin: "https://app.test" }, alipayConfig());
         const wechat = await createProviderCheckout("wechat", { ...order, provider: "wechat" }, { origin: "https://app.test" }, wechatConfig());
         const payply = await createProviderCheckout("payply", { ...order, provider: "payply" }, { origin: "https://app.test" }, config({ VOZEB_PRO_PAYPLY_API_KEY: "payply-secret", VOZEB_PRO_PAYPLY_CHECKOUT_URL: `${origin}/payply/checkout` }));
+        const dulupay = await createProviderCheckout("dulupay", { ...order, provider: "dulupay" }, { origin: "https://app.test", clientIp: "203.0.113.10" }, dulupayConfig());
 
         expect(stripe).toMatchObject({ kind: "redirect", providerOrderId: "cs_fixture", url: "https://checkout.fixture/stripe" });
         expect(alipay).toMatchObject({ kind: "qr", providerOrderId: order.orderNo, providerPaymentId: "alipay_trade_fixture", qrContent: "https://checkout.fixture/alipay-qr" });
         expect(wechat).toMatchObject({ kind: "qr", qrContent: "weixin://wxpay/bizpayurl?pr=fixture" });
         expect(payply).toMatchObject({ kind: "redirect", providerOrderId: "payply_trade_fixture", providerPaymentId: "payply_payment_fixture", url: "https://checkout.fixture/payply" });
-        expect(fixture.requests.map((request) => request.path)).toEqual(["/stripe/v1/checkout/sessions", "/alipay/gateway.do", "/wechat/v3/pay/transactions/native", "/payply/checkout"]);
+        expect(dulupay).toMatchObject({ kind: "qr", providerOrderId: "dulupay_trade_fixture", qrContent: "https://checkout.fixture/dulupay-qr" });
+        expect(fixture.requests.map((request) => request.path)).toEqual(["/stripe/v1/checkout/sessions", "/alipay/gateway.do", "/wechat/v3/pay/transactions/native", "/payply/checkout", "/dulupay/api/pay/create"]);
         expect(fixture.requests[0]?.headers["idempotency-key"]).toBe("vozeb-pro-checkout-order-live");
         expect(fixture.requests[2]?.headers.authorization).toContain('mchid="1900000001"');
         expect(fixture.requests[3]?.headers.authorization).toBe("Bearer payply-secret");
+        const dulupayRequest = new URLSearchParams(fixture.requests[4]?.body.toString("utf8"));
+        expect(dulupayRequest.get("out_trade_no")).toBe(order.orderNo);
+        expect(dulupayRequest.get("money")).toBe("12.99");
+        expect(dulupayRequest.get("clientip")).toBe("203.0.113.10");
+        expect(dulupayRequest.get("sign_type")).toBe("RSA");
+        expect(dulupayRequest.get("sign")).toBeTruthy();
     });
 
-    it("creates Stripe, Alipay, WeChat and PayPly refunds", async () => {
+    it("creates Stripe, Alipay, WeChat, PayPly and Dulupay refunds", async () => {
         setRuntimeConfig({ VOZEB_PRO_STRIPE_SECRET_KEY: "stripe-secret", VOZEB_PRO_STRIPE_API_BASE: `${origin}/stripe` });
         const stripe = await refundPaymentTransaction(order, payment);
 
@@ -121,14 +132,22 @@ describe("payment providers over a live compatible HTTP fixture", () => {
         setRuntimeConfig({ VOZEB_PRO_PAYPLY_API_KEY: "payply-secret", VOZEB_PRO_PAYPLY_REFUND_URL: `${origin}/payply/refund` });
         const payply = await refundPaymentTransaction({ ...order, provider: "payply" }, { ...payment, provider: "payply", providerTradeId: "payply_trade_fixture", providerPaymentId: "payply_payment_fixture" });
 
+        setRuntimeConfig(dulupayConfig().valuesByEnvName);
+        const dulupay = await refundPaymentTransaction({ ...order, provider: "dulupay" }, { ...payment, provider: "dulupay", providerTradeId: "dulupay_trade_fixture", providerPaymentId: "dulupay_api_trade_fixture" });
+
         expect(stripe).toMatchObject({ status: "succeeded", providerRefundId: "re_fixture" });
         expect(alipay).toMatchObject({ status: "succeeded", providerRefundId: "vozeb-pro-refund-order-live" });
         expect(wechat).toMatchObject({ status: "succeeded", providerRefundId: "wx_refund_fixture" });
         expect(payply).toMatchObject({ status: "succeeded", providerRefundId: "payply_refund_fixture" });
-        expect(fixture.requests.map((request) => request.path)).toEqual(["/stripe/v1/refunds", "/alipay/gateway.do", "/wechat/v3/refund/domestic/refunds", "/payply/refund"]);
+        expect(dulupay).toMatchObject({ status: "succeeded", providerRefundId: "dulupay_refund_fixture" });
+        expect(fixture.requests.map((request) => request.path)).toEqual(["/stripe/v1/refunds", "/alipay/gateway.do", "/wechat/v3/refund/domestic/refunds", "/payply/refund", "/dulupay/api/pay/refund"]);
         expect(fixture.requests[0]?.headers["idempotency-key"]).toBe("vozeb-pro-refund-order-live");
         expect(fixture.requests[2]?.headers.authorization).toContain('mchid="1900000001"');
         expect(fixture.requests[3]?.headers["idempotency-key"]).toBe("vozeb-pro-refund-order-live");
+        const dulupayRefundRequest = new URLSearchParams(fixture.requests[4]?.body.toString("utf8"));
+        expect(dulupayRefundRequest.get("trade_no")).toBe("dulupay_trade_fixture");
+        expect(dulupayRefundRequest.get("money")).toBe("12.99");
+        expect(dulupayRefundRequest.get("out_refund_no")).toBe("vozeb-pro-refund-order-live");
     });
 });
 
@@ -143,6 +162,16 @@ function alipayConfig(): PaymentRuntimeConfig {
         VOZEB_PRO_ALIPAY_PRIVATE_KEY: alipayPrivateKey,
         VOZEB_PRO_ALIPAY_PUBLIC_KEY: alipayPublicKey,
         VOZEB_PRO_ALIPAY_GATEWAY_URL: `${origin}/alipay/gateway.do`,
+    });
+}
+
+function dulupayConfig(): PaymentRuntimeConfig {
+    return config({
+        VOZEB_PRO_DULUPAY_PID: "1001",
+        VOZEB_PRO_DULUPAY_PRIVATE_KEY: dulupayPrivateKey,
+        VOZEB_PRO_DULUPAY_PUBLIC_KEY: dulupayPublicKey,
+        VOZEB_PRO_DULUPAY_GATEWAY_URL: `${origin}/dulupay`,
+        VOZEB_PRO_DULUPAY_REFUND_ENABLED: "enabled",
     });
 }
 

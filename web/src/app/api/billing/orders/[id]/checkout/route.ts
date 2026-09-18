@@ -6,6 +6,7 @@ import { auditActorFromRequest, safeRecordAuditLog } from "@/lib/server/audit-lo
 import { BillingInputError, isBillingInputError } from "@/lib/server/billing-service";
 import { createPaymentCheckoutForOrder } from "@/lib/server/payment-checkout-service";
 import { readRequestBodyText, RequestBodyTooLargeError } from "@/lib/server/request-body-limit";
+import { getClientIp } from "@/lib/server/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +28,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
             userId: currentUser.id,
             provider: body.provider,
             origin: request.nextUrl.origin,
+            clientIp: getClientIp(request),
         });
         await safeRecordAuditLog({
             action: "billing.order.checkout",

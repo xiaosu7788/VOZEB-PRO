@@ -4,7 +4,7 @@ import { normalizePaymentProvider } from "@/lib/payment-provider";
 import { BillingInputError } from "@/lib/server/billing-errors";
 import type { JsonValue } from "@/lib/server/database";
 import { getPaymentRuntimeEnv, getPaymentRuntimeValue, type PaymentRuntimeConfig } from "@/lib/server/payment-config-store";
-import { loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
+import { buildRsaSignatureContent, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
 
 type WebhookStatus = "succeeded" | "ignored";
 
@@ -112,6 +112,36 @@ const alipayWebhookAdapter: PaymentWebhookAdapter = {
     },
 };
 
+const dulupayWebhookAdapter: PaymentWebhookAdapter = {
+    parse(provider, rawBody, _headers, paymentConfig) {
+        const payload = parseFormPayload(rawBody);
+        const pid = getPaymentRuntimeEnv(paymentConfig, "VOZEB_PRO_DULUPAY_PID");
+        const signatureValid = verifyDulupaySignature(payload, paymentConfig, pid);
+        const tradeStatus = normalizeText(payload.trade_status, "", 80).toUpperCase();
+        return {
+            eventId: normalizeText(payload.trade_no ? `${payload.trade_no}:${tradeStatus || "unknown"}` : "", deterministicEventId(provider, rawBody), 160),
+            eventType: `dulupay.${normalizeText(payload.type, "notify", 40).toLowerCase()}`,
+            orderNo: normalizeOptionalId(payload.out_trade_no),
+            status: signatureValid && tradeStatus === "TRADE_SUCCESS" ? "succeeded" : "ignored",
+            providerTradeId: normalizeOptionalText(payload.trade_no, 160),
+            providerPaymentId: normalizeOptionalText(payload.api_trade_no, 160),
+            amountCents: yuanDecimalToCents(payload.money),
+            currency: "CNY",
+            paidAt: parseDulupayDate(payload.endtime || payload.addtime),
+            payload,
+            signatureValid,
+        };
+    },
+};
+
+export function verifyDulupaySignature(payload: Record<string, string>, paymentConfig: PaymentRuntimeConfig, expectedPid = getPaymentRuntimeEnv(paymentConfig, "VOZEB_PRO_DULUPAY_PID")) {
+    const sign = payload.sign || "";
+    if (!sign) return false;
+    if (expectedPid && payload.pid !== expectedPid) return false;
+    if (normalizeText(payload.sign_type, "RSA", 20).toUpperCase() !== "RSA") return false;
+    return verifyRsaSha256(buildRsaSignatureContent(payload), sign, loadPaymentPublicKey(paymentConfig, "VOZEB_PRO_DULUPAY_PUBLIC_KEY", "VOZEB_PRO_DULUPAY_PUBLIC_KEY_PATH"));
+}
+
 const wechatWebhookAdapter: PaymentWebhookAdapter = {
     parse(provider, rawBody, headers, paymentConfig) {
         const envelope = parseJsonPayload(rawBody);
@@ -152,6 +182,7 @@ export function resolveWebhookAdapter(provider: string) {
     if (provider === "stripe") return stripeWebhookAdapter;
     if (provider === "alipay") return alipayWebhookAdapter;
     if (provider === "wechat") return wechatWebhookAdapter;
+    if (provider === "dulupay") return dulupayWebhookAdapter;
     return customWebhookAdapter;
 }
 
@@ -366,6 +397,13 @@ function normalizeOptionalIso(value: unknown) {
 }
 
 function parseAlipayDate(value: unknown) {
+    const text = normalizeText(value, "", 40);
+    if (!text) return undefined;
+    const date = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? new Date(`${text.replace(" ", "T")}+08:00`) : new Date(text);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+function parseDulupayDate(value: unknown) {
     const text = normalizeText(value, "", 40);
     if (!text) return undefined;
     const date = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? new Date(`${text.replace(" ", "T")}+08:00`) : new Date(text);

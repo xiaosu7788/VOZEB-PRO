@@ -15,6 +15,7 @@ const providers = [
     { label: "支付宝", value: "alipay", icon: Landmark, description: "支付宝安全支付" },
     { label: "微信支付", value: "wechat", icon: QrCode, description: "微信扫码支付" },
     { label: "PayPly", value: "payply", icon: WalletCards, description: "自定义支付接口" },
+    { label: "嘟噜支付", value: "dulupay", icon: WalletCards, description: "支付宝与微信聚合支付" },
     { label: "人工确认", value: "manual", icon: FileText, description: "线下转账或人工开通" },
 ] as const;
 

@@ -6,7 +6,8 @@ import { normalizePaymentProvider } from "@/lib/payment-provider";
 import { BillingInputError } from "@/lib/server/billing-errors";
 import { getPaymentRuntimeEnv, getPaymentRuntimeValue, type PaymentRuntimeConfig } from "@/lib/server/payment-config-store";
 import type { BillingOrderRecord, JsonValue } from "@/lib/server/database";
-import { loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
+import { buildRsaSignatureContent, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
+import { safePaymentHttpUrl } from "@/lib/payment-url";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 import type { CreatePaymentCheckoutOptions, PaymentCheckoutKind, PaymentCheckoutResult } from "./payment-checkout-types";
 import { normalizePaymentForm, type PaymentForm } from "./payment-form";
@@ -16,6 +17,7 @@ export async function createProviderCheckout(provider: string, order: BillingOrd
     if (provider === "alipay") return createAlipayCheckout(order, options, paymentConfig);
     if (provider === "wechat") return createWechatNativeCheckout(order, options, paymentConfig);
     if (provider === "payply") return createPayplyCheckout(order, options, paymentConfig);
+    if (provider === "dulupay") return createDulupayCheckout(order, options, paymentConfig);
     if (provider === "manual" || provider === "custom") return createManualCheckout(provider, order);
     throw new BillingInputError("暂不支持该支付渠道", 400);
 }
@@ -304,6 +306,96 @@ async function createPayplyCheckout(order: BillingOrderRecord, options: CreatePa
     };
 }
 
+const DEFAULT_DULUPAY_GATEWAY = "https://api.dulupay.com";
+
+async function createDulupayCheckout(order: BillingOrderRecord, options: CreatePaymentCheckoutOptions, paymentConfig: PaymentRuntimeConfig): Promise<PaymentCheckoutResult> {
+    if (order.currency.toUpperCase() !== "CNY") throw new BillingInputError("嘟噜支付仅支持人民币 CNY 订单", 400);
+    const pid = requiredConfig(paymentConfig, "VOZEB_PRO_DULUPAY_PID");
+    const privateKey = loadPrivateKey(paymentConfig, "VOZEB_PRO_DULUPAY_PRIVATE_KEY", "VOZEB_PRO_DULUPAY_PRIVATE_KEY_PATH");
+    const clientIp = normalizeText(options.clientIp, "", 60);
+    if (!clientIp || clientIp === "unknown") throw new BillingInputError("无法确定下单用户 IP，请先正确配置 VOZEB_PRO_TRUSTED_PROXY_HOPS 再使用嘟噜支付", 500);
+    const origin = resolveOrigin(options.origin);
+    const gateway = (getPaymentRuntimeEnv(paymentConfig, "VOZEB_PRO_DULUPAY_GATEWAY_URL") || DEFAULT_DULUPAY_GATEWAY).replace(/\/+$/, "");
+    const method = dulupayMethod(paymentConfig);
+    const params: Record<string, string> = {
+        pid,
+        method,
+        type: dulupayType(paymentConfig),
+        out_trade_no: order.orderNo,
+        notify_url: getPaymentRuntimeEnv(paymentConfig, "VOZEB_PRO_DULUPAY_NOTIFY_URL") || `${origin}/api/billing/webhooks/dulupay`,
+        return_url: getPaymentRuntimeEnv(paymentConfig, "VOZEB_PRO_DULUPAY_RETURN_URL") || `${origin}/billing/success?orderId=${encodeURIComponent(order.id)}`,
+        name: truncateByCodePoint(order.subject, 127),
+        money: centsToDecimal(order.amountCents),
+        clientip: clientIp,
+        param: order.id,
+        timestamp: Math.floor(Date.now() / 1000).toString(),
+        sign_type: "RSA",
+    };
+    const device = getPaymentRuntimeEnv(paymentConfig, "VOZEB_PRO_DULUPAY_DEVICE");
+    if (method === "web" && device) params.device = device;
+    params.sign = signDulupayParams(params, privateKey);
+
+    const response = await fetchSafeOutbound(`${gateway}/api/pay/create`, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(params),
+        signal: AbortSignal.timeout(20_000),
+    });
+    const payload = parseJsonObject(await response.text());
+    if (!response.ok) throw new BillingInputError(readDulupayError(payload, "嘟噜支付下单失败"), response.status >= 500 ? 502 : 400);
+    if (normalizeText(payload.code, "", 20) !== "0") throw new BillingInputError(readDulupayError(payload, "嘟噜支付下单失败"), 400);
+    const sign = normalizeText(payload.sign, "", 2000);
+    const publicKey = loadPaymentPublicKey(paymentConfig, "VOZEB_PRO_DULUPAY_PUBLIC_KEY", "VOZEB_PRO_DULUPAY_PUBLIC_KEY_PATH");
+    if (!sign || !verifyRsaSha256(buildRsaSignatureContent(payload), sign, publicKey)) throw new BillingInputError("嘟噜支付下单响应验签失败", 502);
+    const payInfo = normalizeText(payload.pay_info, "", 4000);
+    if (!payInfo) throw new BillingInputError("嘟噜支付未返回支付参数", 502);
+    return dulupayCheckoutResult(normalizeText(payload.pay_type, "", 40).toLowerCase(), payInfo, order, normalizeText(payload.trade_no, "", 160));
+}
+
+function dulupayCheckoutResult(payType: string, payInfo: string, order: BillingOrderRecord, providerTradeNo: string): PaymentCheckoutResult {
+    const base = {
+        provider: "dulupay",
+        orderId: order.id,
+        orderNo: order.orderNo,
+        providerOrderId: providerTradeNo || order.orderNo,
+        expiresAt: order.expiresAt,
+    };
+    if (payType === "qrcode") return { ...base, kind: "qr", url: payInfo, qrContent: payInfo };
+    if (payType === "html") {
+        const form = normalizePaymentForm(payInfo);
+        if (!form) throw new BillingInputError("嘟噜支付返回的支付 HTML 无法解析为可提交表单", 502);
+        return { ...base, kind: "form", form };
+    }
+    if (payType === "jump") {
+        const url = safePaymentHttpUrl(payInfo);
+        if (!url) throw new BillingInputError("嘟噜支付返回的跳转支付参数不是可跳转的 https 地址", 502);
+        return { ...base, kind: "redirect", url };
+    }
+    throw new BillingInputError(`嘟噜支付返回的发起支付类型不受支持：${payType || "unknown"}，请在后台改用通用网页支付或跳转支付`, 502);
+}
+
+function signDulupayParams(params: Record<string, string>, privateKey: string) {
+    return createSign("RSA-SHA256").update(buildRsaSignatureContent(params), "utf8").sign(privateKey, "base64");
+}
+
+function dulupayMethod(config: PaymentRuntimeConfig) {
+    const value = getPaymentRuntimeEnv(config, "VOZEB_PRO_DULUPAY_METHOD");
+    if (!value) return "web";
+    if (value !== "web" && value !== "jump") throw new BillingInputError("嘟噜支付接口类型配置无效，只能填写 web 或 jump", 500);
+    return value;
+}
+
+function dulupayType(config: PaymentRuntimeConfig) {
+    const value = getPaymentRuntimeEnv(config, "VOZEB_PRO_DULUPAY_TYPE");
+    if (!value) return "alipay";
+    if (value !== "alipay" && value !== "wxpay") throw new BillingInputError("嘟噜支付方式配置无效，只能填写 alipay 或 wxpay", 500);
+    return value;
+}
+function truncateByCodePoint(value: string, maxCodePoints: number) {
+    const codePoints = Array.from(value);
+    return codePoints.length <= maxCodePoints ? value : codePoints.slice(0, maxCodePoints).join("");
+}
+
 function signAlipayParams(params: Record<string, string>, privateKey: string) {
     const content = Object.keys(params)
         .filter((key) => key !== "sign" && params[key] !== "")
@@ -393,6 +485,9 @@ function normalizePrivateKey(value: string) {
     return `-----BEGIN PRIVATE KEY-----\n${text.match(/.{1,64}/g)?.join("\n") || text}\n-----END PRIVATE KEY-----`;
 }
 
+function readDulupayError(payload: Record<string, unknown>, fallback: string) {
+    return normalizeText(payload.msg || payload.message || payload.error, fallback, 300);
+}
 function stripeApiBase(config: PaymentRuntimeConfig) {
     return (getPaymentRuntimeEnv(config, "VOZEB_PRO_STRIPE_API_BASE") || "https://api.stripe.com").replace(/\/+$/, "");
 }

@@ -417,6 +417,7 @@ export function providerIcon(provider: PaymentProviderConfig["id"]) {
     if (provider === "alipay") return Landmark;
     if (provider === "wechat") return QrCode;
     if (provider === "payply") return WalletCards;
+    if (provider === "dulupay") return WalletCards;
     return FileText;
 }
 
@@ -484,6 +485,7 @@ export function providerLabel(value: string) {
     if (value === "alipay") return "支付宝";
     if (value === "wechat") return "微信支付";
     if (value === "payply") return "PayPly";
+    if (value === "dulupay") return "嘟噜支付";
     if (value === "manual") return "人工确认";
     return value || "-";
 }

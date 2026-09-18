@@ -19,4 +19,5 @@ export type CreatePaymentCheckoutOptions = {
     origin?: string;
     provider?: unknown;
     userId?: string;
+    clientIp?: string;
 };

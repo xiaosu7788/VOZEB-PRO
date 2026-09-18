@@ -5,7 +5,7 @@ import type { ParsedPaymentWebhook } from "@/lib/server/payment-webhook-adapters
 import { BillingInputError } from "@/lib/server/billing-errors";
 import type { BillingOrderRecord, JsonValue } from "@/lib/server/database";
 import { getPaymentRuntimeConfig, getPaymentRuntimeEnv, getPaymentRuntimeValue, type PaymentRuntimeConfig } from "@/lib/server/payment-config-store";
-import { loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
+import { buildRsaSignatureContent, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 
 export type VerifiedPaymentTransaction = {
@@ -33,6 +33,7 @@ export async function verifyPaymentTransaction(provider: string, parsed: ParsedP
         else if (provider === "alipay") queried = await queryAlipayPayment(order, callback, config);
         else if (provider === "wechat") queried = await queryWechatPayment(order, config);
         else if (provider === "payply") queried = await queryPayplyPayment(order, callback, config);
+        else if (provider === "dulupay") queried = await queryDulupayPayment(order, callback, config);
     } catch (error) {
         return { verified: false, reason: error instanceof Error ? error.message.slice(0, 300) : "支付商交易查询失败", payment: callback };
     }
@@ -219,6 +220,45 @@ async function queryPayplyPayment(order: BillingOrderRecord, payment: VerifiedPa
         paidAt: optionalIso(readConfiguredPath(config, payload, "VOZEB_PRO_PAYPLY_QUERY_PAID_AT_FIELD", ["paidAt", "successTime", "data.paidAt"])),
         rawPayload: sanitizeJson(payload),
     };
+}
+
+async function queryDulupayPayment(order: BillingOrderRecord, payment: VerifiedPaymentTransaction, config: PaymentRuntimeConfig): Promise<VerifiedPaymentTransaction> {
+    const pid = requiredConfig(config, "VOZEB_PRO_DULUPAY_PID");
+    const privateKey = loadPrivateKey(config, "VOZEB_PRO_DULUPAY_PRIVATE_KEY", "VOZEB_PRO_DULUPAY_PRIVATE_KEY_PATH");
+    const tradeNo = clean(payment.providerTradeId, 160);
+    const params: Record<string, string> = { pid, timestamp: Math.floor(Date.now() / 1000).toString(), sign_type: "RSA" };
+    if (tradeNo) params.trade_no = tradeNo;
+    else params.out_trade_no = order.orderNo;
+    params.sign = createSign("RSA-SHA256").update(buildRsaSignatureContent(params), "utf8").sign(privateKey, "base64");
+
+    const response = await fetchSafeOutbound(`${dulupayGateway(config)}/api/pay/query`, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(params),
+        signal: AbortSignal.timeout(15_000),
+    });
+    const payload = parseJsonObject(await response.text());
+    if (!response.ok) throw new BillingInputError(readError(payload, "嘟噜支付交易查询失败"), response.status >= 500 ? 502 : 400);
+    if (String(payload.code ?? "") !== "0") throw new BillingInputError(readError(payload, "嘟噜支付交易查询失败"), 400);
+    const sign = clean(payload.sign, 2000);
+    if (!sign || !verifyRsaSha256(buildRsaSignatureContent(payload), sign, loadPaymentPublicKey(config, "VOZEB_PRO_DULUPAY_PUBLIC_KEY", "VOZEB_PRO_DULUPAY_PUBLIC_KEY_PATH"))) {
+        throw new BillingInputError("嘟噜支付交易查询响应验签失败", 502);
+    }
+    const status = clean(payload.status, 20);
+    return {
+        status: status === "1" ? "succeeded" : status === "2" ? "failed" : "pending",
+        orderNo: clean(payload.out_trade_no, 120),
+        providerTradeId: clean(payload.trade_no, 160),
+        providerPaymentId: clean(payload.api_trade_no, 160),
+        amountCents: decimalToCents(payload.money),
+        currency: "CNY",
+        paidAt: optionalIso(payload.endtime),
+        rawPayload: sanitizeJson(payload),
+    };
+}
+
+function dulupayGateway(config: PaymentRuntimeConfig) {
+    return (getPaymentRuntimeEnv(config, "VOZEB_PRO_DULUPAY_GATEWAY_URL") || "https://api.dulupay.com").replace(/\/+$/, "");
 }
 
 function stripeStatus(payload: Record<string, unknown>, paymentIntent: Record<string, unknown>): VerifiedPaymentTransaction["status"] {
