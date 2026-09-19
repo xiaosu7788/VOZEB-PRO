@@ -22,16 +22,22 @@ export function buildRsaSignatureContent(params: Record<string, unknown>, exclud
 
 export function loadPaymentPublicKey(paymentConfig: PaymentRuntimeConfig, valueEnv: string, pathEnv: string, certificateEnv?: string, certificatePathEnv?: string) {
     const direct = getPaymentRuntimeEnv(paymentConfig, valueEnv) || (certificateEnv ? getPaymentRuntimeEnv(paymentConfig, certificateEnv) : "");
-    if (direct) return normalizePublicKey(direct);
+    if (direct) return normalizePublicKey(direct, valueEnv);
     const path = getPaymentRuntimeEnv(paymentConfig, pathEnv) || (certificatePathEnv ? getPaymentRuntimeEnv(paymentConfig, certificatePathEnv) : "");
-    if (path) return normalizePublicKey(readFileSync(path, "utf8"));
+    if (path) return normalizePublicKey(readFileSync(path, "utf8"), valueEnv);
     throw new BillingInputError(`缺少支付公钥配置：${valueEnv}`, 500);
 }
 
-function normalizePublicKey(value: string) {
+function normalizePublicKey(value: string, envName: string) {
     const text = value.replace(/\\n/g, "\n").trim();
     if (text.includes("-----BEGIN")) return text;
-    return `-----BEGIN PUBLIC KEY-----\n${text.match(/.{1,64}/g)?.join("\n") || text}\n-----END PUBLIC KEY-----`;
+    const body = text.replace(/[\s\r\n]+/g, "");
+    if (!body) throw new BillingInputError(`支付公钥配置为空：${envName}`, 500);
+    // 与私钥同理：裸正文可能是 SPKI（PUBLIC KEY）或 PKCS#1（RSA PUBLIC KEY），
+    // 不能一律套 SPKI，否则 PKCS#1 公钥验签会整体失败。
+    const wrapped = wrapPemBody(body, "PUBLIC KEY");
+    const wrappedRsa = wrapPemBody(body, "RSA PUBLIC KEY");
+    return canVerifyWith(wrapped) ? wrapped : canVerifyWith(wrappedRsa) ? wrappedRsa : wrapped;
 }
 
 export function loadPaymentPrivateKey(paymentConfig: PaymentRuntimeConfig, valueEnv: string, pathEnv: string) {
@@ -64,5 +70,17 @@ function canSignWith(key: string) {
         return true;
     } catch {
         return false;
+    }
+}
+
+function canVerifyWith(key: string) {
+    try {
+        // 空签名必然验证失败，但密钥结构非法时会先抛 ASN1/DECODER 错误。
+        // 因此只要没有抛出结构错误，就说明这段 PEM 是可解析的公钥。
+        createVerify("RSA-SHA256").update("").verify(key, "", "base64");
+        return true;
+    } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String((error as { code?: string }).code || "") : "";
+        return code === "ERR_OSSL_RSA_BAD_SIGNATURE";
     }
 }
