@@ -1,0 +1,27 @@
+# 宝塔 host 网络部署的本地覆盖配置：把应用端口从 3000 改为 3004。
+#
+# 这个文件名不会触发 Docker Compose 的自动合并，必须在每次命令中显式传入：
+#
+#   docker compose -f docker-compose.baota.yml -f docker-compose.baota.override.yml up -d
+#
+# 反向代理（Nginx）需要指向同一个端口，并保持 VOZEB_PRO_TRUSTED_PROXY_HOPS 与实际代理层数一致。
+services:
+  app:
+    command: ["sh", "-c", "cd /app/web && PORT=3004 node server.js"]
+    environment:
+      VOZEB_PRO_INTERNAL_ORIGIN: http://127.0.0.1:3004
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3004/api/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+  generation-worker:
+    environment:
+      VOZEB_PRO_WORKER_API_ORIGIN: http://127.0.0.1:3004
