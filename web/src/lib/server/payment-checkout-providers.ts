@@ -6,7 +6,7 @@ import { normalizePaymentProvider } from "@/lib/payment-provider";
 import { BillingInputError } from "@/lib/server/billing-errors";
 import { getPaymentRuntimeEnv, getPaymentRuntimeValue, type PaymentRuntimeConfig } from "@/lib/server/payment-config-store";
 import type { BillingOrderRecord, JsonValue } from "@/lib/server/database";
-import { buildRsaSignatureContent, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
+import { buildRsaSignatureContent, loadPaymentPrivateKey, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
 import { safePaymentHttpUrl } from "@/lib/payment-url";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 import type { CreatePaymentCheckoutOptions, PaymentCheckoutKind, PaymentCheckoutResult } from "./payment-checkout-types";
@@ -472,17 +472,7 @@ function requiredConfig(config: PaymentRuntimeConfig, ...names: string[]) {
 }
 
 function loadPrivateKey(config: PaymentRuntimeConfig, valueEnv: string, pathEnv: string) {
-    const value = getPaymentRuntimeEnv(config, valueEnv);
-    if (value) return normalizePrivateKey(value);
-    const path = getPaymentRuntimeEnv(config, pathEnv);
-    if (path) return normalizePrivateKey(readFileSync(path, "utf8"));
-    throw new BillingInputError(`缺少支付私钥配置：${valueEnv}`, 500);
-}
-
-function normalizePrivateKey(value: string) {
-    const text = value.replace(/\\n/g, "\n").trim();
-    if (text.includes("-----BEGIN")) return text;
-    return `-----BEGIN PRIVATE KEY-----\n${text.match(/.{1,64}/g)?.join("\n") || text}\n-----END PRIVATE KEY-----`;
+    return loadPaymentPrivateKey(config, valueEnv, pathEnv);
 }
 
 function readDulupayError(payload: Record<string, unknown>, fallback: string) {

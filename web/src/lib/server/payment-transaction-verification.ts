@@ -5,7 +5,7 @@ import type { ParsedPaymentWebhook } from "@/lib/server/payment-webhook-adapters
 import { BillingInputError } from "@/lib/server/billing-errors";
 import type { BillingOrderRecord, JsonValue } from "@/lib/server/database";
 import { getPaymentRuntimeConfig, getPaymentRuntimeEnv, getPaymentRuntimeValue, type PaymentRuntimeConfig } from "@/lib/server/payment-config-store";
-import { buildRsaSignatureContent, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
+import { buildRsaSignatureContent, loadPaymentPrivateKey, loadPaymentPublicKey, verifyRsaSha256 } from "@/lib/server/payment-signature-utils";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 
 export type VerifiedPaymentTransaction = {
@@ -278,11 +278,7 @@ function verifyWechatResponse(raw: string, headers: Headers, config: PaymentRunt
 }
 
 function loadPrivateKey(config: PaymentRuntimeConfig, valueName: string, pathName: string) {
-    const value = getPaymentRuntimeEnv(config, valueName);
-    const text = value || (getPaymentRuntimeEnv(config, pathName) ? readFileSync(getPaymentRuntimeEnv(config, pathName), "utf8") : "");
-    if (!text) throw new BillingInputError(`缺少支付私钥配置：${valueName}`, 500);
-    const normalized = text.replace(/\\n/g, "\n").trim();
-    return normalized.includes("-----BEGIN") ? normalized : `-----BEGIN PRIVATE KEY-----\n${normalized.match(/.{1,64}/g)?.join("\n") || normalized}\n-----END PRIVATE KEY-----`;
+    return loadPaymentPrivateKey(config, valueName, pathName);
 }
 
 function signAlipayParams(params: Record<string, string>, privateKey: string) {

@@ -1,4 +1,4 @@
-import { createVerify } from "node:crypto";
+import { createSign, createVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { BillingInputError } from "@/lib/server/billing-errors";
@@ -32,4 +32,37 @@ function normalizePublicKey(value: string) {
     const text = value.replace(/\\n/g, "\n").trim();
     if (text.includes("-----BEGIN")) return text;
     return `-----BEGIN PUBLIC KEY-----\n${text.match(/.{1,64}/g)?.join("\n") || text}\n-----END PUBLIC KEY-----`;
+}
+
+export function loadPaymentPrivateKey(paymentConfig: PaymentRuntimeConfig, valueEnv: string, pathEnv: string) {
+    const value = getPaymentRuntimeEnv(paymentConfig, valueEnv);
+    if (value) return normalizePrivateKey(value, valueEnv);
+    const path = getPaymentRuntimeEnv(paymentConfig, pathEnv);
+    if (path) return normalizePrivateKey(readFileSync(path, "utf8"), valueEnv);
+    throw new BillingInputError(`缺少支付私钥配置：${valueEnv}`, 500);
+}
+
+// 商户后台常常只提供 base64 正文，也可能给出 PKCS#1（RSA PRIVATE KEY）或 PKCS#8（PRIVATE KEY）两种封装。
+// 没有头尾时不能一律套 PKCS#8，否则 PKCS#1 密钥会被解成错误结构，报 DECODER routines::unsupported。
+function normalizePrivateKey(value: string, envName: string) {
+    const text = value.replace(/\\n/g, "\n").trim();
+    if (text.includes("-----BEGIN")) return text;
+    const body = text.replace(/[\s\r\n]+/g, "");
+    if (!body) throw new BillingInputError(`支付私钥配置为空：${envName}`, 500);
+    const wrapped = wrapPemBody(body, "PRIVATE KEY");
+    const wrappedRsa = wrapPemBody(body, "RSA PRIVATE KEY");
+    return canSignWith(wrapped) ? wrapped : canSignWith(wrappedRsa) ? wrappedRsa : wrapped;
+}
+
+function wrapPemBody(body: string, label: string) {
+    return `-----BEGIN ${label}-----\n${body.match(/.{1,64}/g)?.join("\n") || body}\n-----END ${label}-----`;
+}
+
+function canSignWith(key: string) {
+    try {
+        createSign("RSA-SHA256").update("").sign(key, "base64");
+        return true;
+    } catch {
+        return false;
+    }
 }
