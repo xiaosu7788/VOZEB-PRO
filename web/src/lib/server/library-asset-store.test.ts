@@ -56,7 +56,18 @@ describe("library asset file provider", () => {
         expect(statement).toContain("WHERE user_id = $1");
         expect(statement).toContain("ORDER BY updated_at DESC, id ASC");
         expect(statement).toContain("LIMIT $5 OFFSET $6");
-        expect(params).toEqual(["user-one", "text", "品牌", "%品牌%", 5, 5]);
+        expect(params).toEqual(["user-one", "text", "品牌", "%品牌%", 5, 5, false]);
+    });
+
+    it("filters text assets when a media-only page is requested", async () => {
+        mocks.provider = "postgres";
+        mocks.postgresQuery.mockResolvedValue({ rows: [{ assets: [], total: "0" }] });
+
+        await expect(listLibraryAssetPage("user-one", { page: 1, pageSize: 20, mediaOnly: true })).resolves.toMatchObject({ total: 0, items: [] });
+
+        const [statement, params] = mocks.postgresQuery.mock.calls[0] as [string, unknown[]];
+        expect(statement).toContain("kind <> 'text'");
+        expect(params).toEqual(["user-one", null, "", "%%", 20, 0, true]);
     });
 
     it("prevents the unbounded asset reader from querying PostgreSQL", async () => {

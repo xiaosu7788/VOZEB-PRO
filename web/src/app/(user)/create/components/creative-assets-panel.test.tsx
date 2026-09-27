@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 
-import { ConversationAssets, PromptList } from "./creative-assets-panel";
+import { ConversationAssets, MediaLibraryList, PromptList } from "./creative-assets-panel";
+import type { Asset } from "@/lib/library-asset-contract";
 
 const imageAsset: CreativeAsset = {
     id: "asset-one",
@@ -29,7 +30,38 @@ const videoAsset: CreativeAsset = {
     metadata: { coverUrl: "/api/reference-assets/asset-video-cover" },
 };
 
+const libraryImage: Asset = {
+    id: "library-one",
+    kind: "image",
+    title: "库图片",
+    coverUrl: "/api/reference-assets/library-cover",
+    data: { dataUrl: "[image omitted]", storageKey: "permanent/source.png", mimeType: "image/png", bytes: 4, width: 10, height: 10 },
+    source: "upload",
+    note: "",
+    tags: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
 describe("CreativeAssetsPanel", () => {
+    it("renders media library assets as compact four-column insert commands", () => {
+        const markup = renderToStaticMarkup(
+            <MediaLibraryList
+                collection={{ items: [libraryImage], page: 1, total: 1, loading: false, loaded: true, error: "" }}
+                onInsert={() => undefined}
+                onRetry={() => undefined}
+                onLoadMore={() => undefined}
+            />,
+        );
+
+        expect(markup).toContain('data-testid="creative-library-assets"');
+        expect(markup).toContain("grid-cols-4");
+        expect(markup).toContain('data-testid="creative-library-insert-action"');
+        expect(markup).toContain('aria-label="插入素材 库图片"');
+        expect(markup).toContain("插入</button>");
+        expect(markup).toContain("format=webp");
+    });
+
     it("renders prompt collections as cover thumbnails with only an insert command", () => {
         const markup = renderToStaticMarkup(
             <PromptList

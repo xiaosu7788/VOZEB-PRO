@@ -1,12 +1,14 @@
 "use client";
 
 import { Button, Drawer, Dropdown, Grid, Input, Modal, Spin, Tabs, Tooltip } from "antd";
-import { AtSign, ChevronDown, CornerDownLeft, FileVideo, ImageIcon, LibraryBig, ListFilter, Play, RefreshCw, Search, Sparkles, X } from "lucide-react";
+import { AtSign, AudioLines, ChevronDown, CornerDownLeft, FileText, FileVideo, ImageIcon, LibraryBig, ListFilter, Play, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { LazyMediaImage } from "@/components/media/lazy-media-image";
+import type { Asset } from "@/lib/library-asset-contract";
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 import { imagePreviewUrl } from "@/lib/media-image-url";
+import { listLibraryAssetPage } from "@/services/api/library-assets";
 import { listMyPrompts } from "@/services/api/my-prompts";
 import { ALL_PROMPTS_OPTION, fetchPrompts, promptCategoryLabel, type Prompt } from "@/services/api/prompts";
 
@@ -19,11 +21,13 @@ type PromptCollection = {
     error: string;
     categories: string[];
 };
-type AssetPanelTab = "assets" | "my" | "library";
+type MediaLibraryCollection = { items: Asset[]; page: number; total: number; loading: boolean; loaded: boolean; error: string };
+type AssetPanelTab = "assets" | "media" | "my" | "library";
 type PanelPreview = { type: "image" | "video"; url: string; title: string; posterUrl?: string };
 
 const emptyPromptCollection = (): PromptCollection => ({ items: [], page: 0, total: 0, loading: false, loaded: false, error: "", categories: [] });
 const resetPromptCollection = (current: PromptCollection): PromptCollection => ({ ...emptyPromptCollection(), categories: current.categories });
+const emptyMediaLibrary = (): MediaLibraryCollection => ({ items: [], page: 0, total: 0, loading: false, loaded: false, error: "" });
 
 export function CreativeAssetsPanel({
     open,
@@ -31,6 +35,7 @@ export function CreativeAssetsPanel({
     assets,
     selectedAssetIds,
     onToggleAsset,
+    onInsertAsset,
     onUsePrompt,
     onClose,
 }: {
@@ -39,12 +44,14 @@ export function CreativeAssetsPanel({
     assets: CreativeAsset[];
     selectedAssetIds: string[];
     onToggleAsset: (id: string) => void;
+    onInsertAsset: (asset: Asset) => void;
     onUsePrompt: (prompt: string) => void;
     onClose: () => void;
 }) {
     const screens = Grid.useBreakpoint();
     const [activeTab, setActiveTab] = useState<AssetPanelTab>("assets");
     const [myPrompts, setMyPrompts] = useState(emptyPromptCollection);
+    const [mediaLibrary, setMediaLibrary] = useState(emptyMediaLibrary);
     const [libraryPrompts, setLibraryPrompts] = useState(emptyPromptCollection);
     const [myPromptCategory, setMyPromptCategory] = useState(ALL_PROMPTS_OPTION);
     const [libraryPromptCategory, setLibraryPromptCategory] = useState(ALL_PROMPTS_OPTION);
@@ -79,13 +86,39 @@ export function CreativeAssetsPanel({
         }
     }, []);
 
+    const loadMediaLibraryPage = useCallback(async (page: number) => {
+        const requestKey = `media:${page}`;
+        if (inFlightRef.current.has(requestKey)) return;
+        inFlightRef.current.add(requestKey);
+        setMediaLibrary((current) => ({ ...current, loading: true, error: "" }));
+        try {
+            const payload = await listLibraryAssetPage({ page, pageSize: 20, mediaOnly: true });
+            setMediaLibrary((current) => ({
+                items: page === 1 ? payload.assets : uniqueMediaAssets([...current.items, ...payload.assets]),
+                page,
+                total: payload.total,
+                loading: false,
+                loaded: true,
+                error: ""
+            }));
+        } catch (error) {
+            setMediaLibrary((current) => ({ ...current, loading: false, loaded: true, error: error instanceof Error ? error.message : "素材加载失败" }));
+        } finally {
+            inFlightRef.current.delete(requestKey);
+        }
+    }, []);
+
     useEffect(() => {
         if (!open || activeTab === "assets") return;
+        if (activeTab === "media") {
+            if (!mediaLibrary.loaded && !mediaLibrary.loading) void loadMediaLibraryPage(1);
+            return;
+        }
         const collection = activeTab === "my" ? myPrompts : libraryPrompts;
         const category = activeTab === "my" ? myPromptCategory : libraryPromptCategory;
         const keyword = activeTab === "my" ? myPromptKeyword : libraryPromptKeyword;
         if (!collection.loaded && !collection.loading) void loadPromptPage(activeTab, 1, category, keyword);
-    }, [activeTab, libraryPromptCategory, libraryPromptKeyword, libraryPrompts, loadPromptPage, myPromptCategory, myPromptKeyword, myPrompts, open]);
+    }, [activeTab, libraryPromptCategory, libraryPromptKeyword, libraryPrompts, loadMediaLibraryPage, loadPromptPage, mediaLibrary, myPromptCategory, myPromptKeyword, myPrompts, open]);
 
     const panel = (
         <div className="flex h-full min-h-0 flex-col bg-white dark:bg-[#15181c]">
@@ -107,6 +140,11 @@ export function CreativeAssetsPanel({
                             key: "assets",
                             label: <TabLabel text="当前对话" count={mediaAssets.length} />,
                             children: <ConversationAssets conversationId={conversationId} assets={mediaAssets} selectedAssetIds={selectedAssetIds} onToggle={onToggleAsset} onPreview={setPreview} />,
+                        },
+                        {
+                            key: "media",
+                            label: <TabLabel text="素材库" count={mediaLibrary.loaded ? mediaLibrary.total : undefined} />,
+                            children: <MediaLibraryList collection={mediaLibrary} onInsert={(item) => onInsertAsset(item)} onRetry={() => void loadMediaLibraryPage(1)} onLoadMore={() => void loadMediaLibraryPage(mediaLibrary.page + 1)} />
                         },
                         {
                             key: "my",
@@ -268,6 +306,58 @@ function ConversationAssetTypeTab({ label, count, active, disabled, onClick }: {
     );
 }
 
+export function MediaLibraryList({ collection, onInsert, onRetry, onLoadMore }: { collection: MediaLibraryCollection; onInsert: (asset: Asset) => void; onRetry: () => void; onLoadMore: () => void }) {
+    const hasMore = collection.items.length < collection.total;
+    return (
+        <div data-testid="creative-library-assets" className="hide-scrollbar h-full min-h-0 overflow-y-auto overscroll-contain px-3 pb-4">
+            {collection.loading && !collection.items.length ? (
+                <div className="grid h-48 place-items-center">
+                    <Spin size="small" />
+                </div>
+            ) : collection.error && !collection.items.length ? (
+                <PanelEmpty
+                    icon={<RefreshCw className="size-5" />}
+                    text={collection.error}
+                    action={(
+                        <Button size="small" type="text" icon={<RefreshCw className="size-3.5" />} onClick={onRetry}>
+                            重新加载
+                        </Button>
+                    )}
+                />
+            ) : !collection.items.length ? (
+                <PanelEmpty icon={<ImageIcon className="size-5" />} text="暂无可用素材" />
+            ) : (
+                <>
+                    <div className="grid grid-cols-4 gap-1.5">
+                        {collection.items.map((item) => (
+                            <article key={item.id} className="group min-w-0" title={item.title}>
+                                <div className="aspect-square overflow-hidden rounded-md border border-[#e3e7eb] bg-[#f1f3f5] dark:border-[#30363e] dark:bg-[#24282e]">
+                                    <LibraryAssetPreview asset={item} />
+                                </div>
+                                <button
+                                    type="button"
+                                    data-testid="creative-library-insert-action"
+                                    className="mt-1 flex h-5 w-full items-center justify-center gap-1 rounded-sm !bg-transparent !text-[11px] !text-[#68727e] font-medium transition-colors hover:!bg-transparent hover:!text-[#555bc7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6268d8] dark:!text-[#aab3bd] dark:hover:!text-[#c3c5ff]"
+                                    onClick={() => onInsert(item)}
+                                    aria-label={`插入素材 ${item.title}`}
+                                >
+                                    <CornerDownLeft className="size-3" aria-hidden="true" />
+                                    插入
+                                </button>
+                            </article>
+                        ))}
+                    </div>
+                    {hasMore ? (
+                        <Button block type="text" size="small" loading={collection.loading} className="!mt-2 !text-xs" onClick={onLoadMore}>
+                            加载更多
+                        </Button>
+                    ) : null}
+                </>
+            )}
+        </div>
+    );
+}
+
 export function PromptList({
     collection,
     activeCategory,
@@ -410,6 +500,32 @@ function PanelEmpty({ icon, text, action }: { icon: React.ReactNode; text: strin
             {action}
         </div>
     );
+}
+
+function LibraryAssetPreview({ asset }: { asset: Asset }) {
+    if (asset.kind === "image") {
+        const url = asset.coverUrl || asset.data.dataUrl;
+        return url ? <img src={imagePreviewUrl(url, 320)} alt="" className="size-full object-cover" loading="lazy" /> : <LibraryAssetFallback asset={asset} />;
+    }
+    if (asset.kind === "video") {
+        if (asset.coverUrl) return <img src={imagePreviewUrl(asset.coverUrl, 320)} alt="" className="size-full object-cover" loading="lazy" />;
+        const url = asset.data.serverUrl || asset.data.remoteUrl || asset.data.url;
+        return url ? <video src={url} aria-label={asset.title} className="size-full bg-black object-cover" muted playsInline preload="metadata" /> : <LibraryAssetFallback asset={asset} />;
+    }
+    return <LibraryAssetFallback asset={asset} />;
+}
+
+function LibraryAssetFallback({ asset }: { asset: Asset }) {
+    const Icon = asset.kind === "audio" ? AudioLines : asset.kind === "text" ? FileText : ImageIcon;
+    return (
+        <span className="grid size-full place-items-center text-[#7b8490] dark:text-[#aab3bf]">
+            <Icon className="size-5" />
+        </span>
+    );
+}
+
+function uniqueMediaAssets(items: Asset[]) {
+    return Array.from(new Map(items.map((item) => [item.id, item])).values());
 }
 
 function AssetPreview({ asset }: { asset: CreativeAsset }) {

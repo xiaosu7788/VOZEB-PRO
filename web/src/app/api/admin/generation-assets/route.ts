@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { readJsonBodyResult } from "@/lib/auth/request";
 import { findPublicUserIdsByKeyword, getPublicUsersByIds } from "@/lib/auth/store";
-import { cleanupExpiredLocalMediaAssets, deleteLocalMediaAssets, getLocalMediaAssetSummary, listLocalMediaAssets } from "@/lib/server/local-media-storage";
+import { cleanupExpiredLocalMediaAssets, decodeLocalMediaId, deleteLocalMediaAssets, getLocalMediaAssetSummary, listLocalMediaAssets } from "@/lib/server/local-media-storage";
+import { getLocalMediaRegistrations } from "@/lib/server/local-media-registry";
+import { deleteUserMediaAssetsCascade } from "@/lib/server/user-media-deletion-service";
 import { hasAdminPermission } from "@/lib/admin-permissions";
 
 export const runtime = "nodejs";
@@ -53,6 +55,27 @@ export async function DELETE(request: Request) {
     if (body.expired === true) return NextResponse.json({ code: 0, data: await cleanupExpiredLocalMediaAssets(), msg: "过期临时文件已清理" });
     const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === "string") : [];
     if (!ids.length) return NextResponse.json({ code: 400, data: null, msg: "请选择要删除的媒体文件" }, { status: 400 });
-    const result = await deleteLocalMediaAssets(ids);
+    const targets = ids.map((id) => ({ id, target: decodeLocalMediaId(id) })).filter((item): item is { id: string; target: { scope: "generation" | "reference"; relativePath: string } } => Boolean(item.target));
+    const registrations = await getLocalMediaRegistrations(targets.map((item) => item.target.relativePath));
+    const registrationByKey = new Map(registrations.map((registration) => [registration.storageKey, registration]));
+    const cascades = new Map<string, string[]>();
+    const directIds: string[] = [];
+    for (const item of targets) {
+        const registration = registrationByKey.get(item.target.relativePath);
+        if (!registration?.ownerUserId) directIds.push(item.id);
+        else cascades.set(registration.ownerUserId, [...(cascades.get(registration.ownerUserId) || []), registration.storageKey]);
+    }
+    const results: Array<{ deletedFiles: number; deletedBytes: number; removedReferences?: number; blocked: Array<{ id: string; storageKey: string; referenceCount: number }> }> = [];
+    for (const [ownerUserId, storageKeys] of cascades) results.push(await deleteUserMediaAssetsCascade(ownerUserId, storageKeys));
+    if (directIds.length) results.push(await deleteLocalMediaAssets(directIds));
+    const result = results.reduce(
+        (total, current) => ({
+            deletedFiles: total.deletedFiles + current.deletedFiles,
+            deletedBytes: total.deletedBytes + current.deletedBytes,
+            removedReferences: (total.removedReferences || 0) + (current.removedReferences || 0),
+            blocked: [...total.blocked, ...current.blocked],
+        }),
+        { deletedFiles: 0, deletedBytes: 0, removedReferences: 0, blocked: [] as Array<{ id: string; storageKey: string; referenceCount: number }> },
+    );
     return NextResponse.json({ code: 0, data: result, msg: result.blocked.length ? "部分文件仍被业务记录引用，未执行删除" : "媒体文件已删除" });
 }

@@ -11,6 +11,7 @@ import {
     createCreativeConversation,
     getCreativeConversation,
     getCreativeAgentRun,
+    insertLibraryCreativeAsset,
     listCreativeAgentRuns,
     listCreativeAssets,
     listCreativeConversationPage,
@@ -289,6 +290,20 @@ export function useCreateAgent() {
             return addDraftAttachments(files, activeConversationRef.current || "");
         },
         [addDraftAttachments],
+    );
+
+    const insertLibraryAsset = useCallback(
+        async (libraryAssetId: string) => {
+            const generation = conversationGenerationRef.current;
+            const conversationId = await ensureConversation(generation);
+            const asset = await insertLibraryCreativeAsset(conversationId, libraryAssetId);
+            if (isCurrentConversation(conversationId, generation)) {
+                setAssets((current) => (current.some((item) => item.id === asset.id) ? current : [...current, asset]));
+                setSelectedAssetIds((current) => (current.includes(asset.id) ? current : [...current, asset.id]));
+            }
+            return asset;
+        },
+        [ensureConversation, isCurrentConversation],
     );
 
     const materializeDraftAttachments = useCallback(
@@ -624,6 +639,7 @@ export function useCreateAgent() {
         selectAsset: (id: string) => setSelectedAssetIds((current) => (current.includes(id) ? current : [...current, id])),
         uploading,
         uploadAttachments,
+        insertLibraryAsset,
         removeAttachment: (id: string) => {
             if (getCreateDraftAttachment(id)) removeDraftAttachments([id]);
             setSelectedAssetIds((current) => current.filter((item) => item !== id));

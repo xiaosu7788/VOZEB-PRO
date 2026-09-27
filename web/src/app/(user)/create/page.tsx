@@ -8,6 +8,7 @@ import { useRouter } from "next/navigation";
 
 import { CREATIVE_UPLOAD_ACCEPT, CREATIVE_UPLOAD_MAX_BYTES, isCreativeUploadMimeType } from "@/lib/creative-upload";
 import type { CreateOverviewAsset } from "@/lib/create-workbench-overview";
+import type { Asset } from "@/lib/library-asset-contract";
 import type { CreativeAsset, CreativeGenerationMode, CreativeGenerationPreferences, CreativeMessage } from "@/lib/creative-runtime-contract";
 import { reconcileCreativeGenerationPreferences } from "@/lib/creative-model-capabilities";
 import { cn } from "@/lib/utils";
@@ -438,6 +439,18 @@ export default function CreatePage() {
         if (nextPrompt !== promptValueRef.current) updatePrompt(nextPrompt);
     };
 
+    const insertLibraryAsset = (asset: Asset) => {
+        if (asset.kind === "text") {
+            updatePrompt(asset.data.content);
+            window.requestAnimationFrame(() => inputRef.current?.focus());
+            message.success("已插入提示词");
+            return;
+        }
+        void agent.insertLibraryAsset(asset.id)
+            .then(() => message.success("已插入素材"))
+            .catch((error) => message.error(error instanceof Error ? error.message : "插入素材失败"));
+    };
+
     const setAwayFromLatestState = (away: boolean) => {
         if (away === awayFromLatestRef.current) return;
         awayFromLatestRef.current = away;
@@ -761,6 +774,7 @@ export default function CreatePage() {
                     assets={agent.assets}
                     selectedAssetIds={agent.selectedAssetIds}
                     onToggleAsset={toggleReferencedAsset}
+                    onInsertAsset={insertLibraryAsset}
                     onUsePrompt={(value) => {
                         updatePrompt(value);
                         window.requestAnimationFrame(() => inputRef.current?.focus());

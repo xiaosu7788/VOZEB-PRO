@@ -7,15 +7,19 @@ describe("useCreateAgent submission retry", () => {
         const source = await readFile(resolve(process.cwd(), "src/app/(user)/create/use-create-agent.ts"), "utf8");
         const draftStoreSource = await readFile(resolve(process.cwd(), "src/app/(user)/create/use-create-draft-attachments-store.ts"), "utf8");
         const uploadStart = source.indexOf("const uploadAttachments");
-        const materializeStart = source.indexOf("const materializeDraftAttachments", uploadStart);
+        const insertStart = source.indexOf("const insertLibraryAsset", uploadStart);
+        const materializeStart = source.indexOf("const materializeDraftAttachments", insertStart);
         const watchStart = source.indexOf("const watchRun", materializeStart);
         const submitStart = source.indexOf("const submit =", watchStart);
-        const uploadSource = source.slice(uploadStart, materializeStart);
+        const uploadSource = source.slice(uploadStart, insertStart);
+        const insertSource = source.slice(insertStart, materializeStart);
         const materializeSource = source.slice(materializeStart, watchStart);
         const submitSource = source.slice(submitStart, source.indexOf("const retrySubmission", submitStart));
 
         expect(uploadSource).toContain("addDraftAttachments(files");
         expect(uploadSource).not.toContain("ensureConversation");
+        expect(insertSource).toContain("await ensureConversation(generation)");
+        expect(insertSource).toContain("insertLibraryCreativeAsset(conversationId, libraryAssetId)");
         expect(uploadSource).not.toContain("uploadCreativeAsset");
         expect(draftStoreSource).toContain("URL.createObjectURL(file)");
         expect(draftStoreSource).not.toContain("localStorage");

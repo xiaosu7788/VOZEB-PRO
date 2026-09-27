@@ -312,6 +312,10 @@ function encodeMediaId(scope: "generation" | "reference", relativePath: string) 
     return Buffer.from(JSON.stringify({ scope, relativePath }), "utf8").toString("base64url");
 }
 
+export function decodeLocalMediaId(id: string): { scope: "generation" | "reference"; relativePath: string } | null {
+    return decodeMediaId(id);
+}
+
 function decodeMediaId(id: string): { scope: "generation" | "reference"; relativePath: string } | null {
     try {
         const value = JSON.parse(Buffer.from(id, "base64url").toString("utf8")) as Record<string, unknown>;

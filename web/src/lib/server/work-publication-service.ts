@@ -17,6 +17,7 @@ import { collectLocalMediaStorageKeys } from "@/lib/server/local-media-reference
 import { getLocalMediaRegistration, getLocalMediaRegistrations, type LocalMediaRegistration } from "@/lib/server/local-media-registry";
 import { moderateWorkContent } from "@/lib/server/work-content-moderation";
 import { userAvatarUrl } from "@/lib/user-avatar";
+import { clonePublishedWorkAssets, deletePublishedWorkMediaFiles } from "@/lib/server/published-work-media";
 
 type WorkPublicationRepositories = ReturnType<typeof createPostgresRepositories>;
 
@@ -264,31 +265,43 @@ export async function deleteWorkPublicationForUser(userIdValue: unknown, workIdV
     await assertWorkPublicationReady();
     const userId = requiredId(userIdValue, "用户");
     const workId = requiredId(workIdValue, "作品");
-    return withPostgresTransaction(async (client) => {
+    let copiedKeys: string[] = [];
+    const result = await withPostgresTransaction(async (client) => {
         const repos = createPostgresRepositories(client);
         const work = await repos.workPublications.getWorkById(workId, userId, true);
         if (!work) throw new WorkPublicationServiceError("作品不存在", 404);
         if (work.lifecycleStatus !== "revoked") throw new WorkPublicationServiceError("请先下架作品再删除", 409);
+        const versionIds = Array.from(new Set([work.currentVersionId, work.publishedVersionId].filter((value): value is string => Boolean(value))));
+        const versionAssets = await Promise.all(versionIds.map((versionId) => repos.workPublications.listVersionAssets(versionId)));
+        copiedKeys = versionAssets.flat().map((asset) => asset.storageKey);
         const version = work.currentVersionId ? await repos.workPublications.getVersionById(work.currentVersionId) : null;
         if (!(await repos.workPublications.deleteWorkCompletely(work.id))) throw new WorkPublicationServiceError("作品删除失败，请刷新后重试", 409);
         return { id: work.id, title: version?.title || "" };
     });
+    await deletePublishedWorkMediaFiles(copiedKeys);
+    return result;
 }
 
 export async function deleteWorkPublicationForAdmin(adminUserIdValue: unknown, workIdValue: unknown) {
     await assertWorkPublicationReady();
     requiredId(adminUserIdValue, "管理员");
     const workId = requiredId(workIdValue, "作品");
-    return withPostgresTransaction(async (client) => {
+    let copiedKeys: string[] = [];
+    const result = await withPostgresTransaction(async (client) => {
         const repos = createPostgresRepositories(client);
         const work = await repos.workPublications.getWorkById(workId, undefined, true);
         if (!work) throw new WorkPublicationServiceError("作品不存在", 404);
         const deletable = work.lifecycleStatus === "revoked" || (!work.publishedVersionId && (await repos.workPublications.hasTakenDownVersion(work.id)));
         if (!deletable) throw new WorkPublicationServiceError("请先下架作品再删除", 409);
+        const versionIds = Array.from(new Set([work.currentVersionId, work.publishedVersionId].filter((value): value is string => Boolean(value))));
+        const versionAssets = await Promise.all(versionIds.map((versionId) => repos.workPublications.listVersionAssets(versionId)));
+        copiedKeys = versionAssets.flat().map((asset) => asset.storageKey);
         const version = work.currentVersionId ? await repos.workPublications.getVersionById(work.currentVersionId) : null;
         if (!(await repos.workPublications.deleteWorkCompletely(work.id))) throw new WorkPublicationServiceError("作品删除失败，请刷新后重试", 409);
         return { id: work.id, title: version?.title || "" };
     });
+    await deletePublishedWorkMediaFiles(copiedKeys);
+    return result;
 }
 
 export async function reviewWorkPublication(input: { reviewerUserId: unknown; workId: unknown; versionId: unknown; decision: unknown; reason?: unknown }) {
@@ -301,7 +314,9 @@ export async function reviewWorkPublication(input: { reviewerUserId: unknown; wo
     const reason = text(input.reason, 500);
     if (decision === "rejected" && !reason) throw new WorkPublicationServiceError("请填写驳回原因");
 
-    return withPostgresTransaction(async (client) => {
+    let copiedKeys: string[] = [];
+    try {
+        return await withPostgresTransaction(async (client) => {
         const repos = createPostgresRepositories(client);
         const work = await repos.workPublications.getWorkById(workId, undefined, true);
         if (!work) throw new WorkPublicationServiceError("作品不存在", 404);
@@ -317,9 +332,19 @@ export async function reviewWorkPublication(input: { reviewerUserId: unknown; wo
             reviewedByUserId: reviewerUserId,
         });
         if (!reviewed) throw new WorkPublicationServiceError("作品状态已变化，请刷新后重试", 409);
-        if (decision === "approved" && !(await repos.workPublications.setPublishedVersion(work.id, version.id))) throw new WorkPublicationServiceError("公开版本切换失败", 409);
+        if (decision === "approved") {
+            const currentAssets = await repos.workPublications.listVersionAssets(version.id);
+            const copied = await clonePublishedWorkAssets(work.ownerUserId, work.id, currentAssets);
+            copiedKeys = copied.storageKeys;
+            await repos.workPublications.replaceVersionAssets(version.id, copied.assets);
+            if (!(await repos.workPublications.setPublishedVersion(work.id, version.id))) throw new WorkPublicationServiceError("公开版本切换失败", 409);
+        }
         return requiredWorkDetail(repos, work.id);
-    });
+        });
+    } catch (error) {
+        await deletePublishedWorkMediaFiles(copiedKeys);
+        throw error;
+    }
 }
 
 export async function takeDownWorkPublication(input: { reviewerUserId: unknown; workId: unknown; reason?: unknown }) {
@@ -433,7 +458,7 @@ function normalizeDraft(
     candidates: WorkPublicationMediaCandidate[],
 ) {
     const candidateMap = new Map(candidates.map((candidate) => [candidate.storageKey, candidate]));
-    const existingContentKeys = current?.assets.filter((asset) => asset.role === "content").map((asset) => asset.storageKey) || [];
+    const existingContentKeys = current?.assets.filter((asset) => asset.role === "content" && candidateMap.has(asset.storageKey)).map((asset) => asset.storageKey) || [];
     const selectedKeys = normalizeStorageKeys(input.assetStorageKeys, existingContentKeys.length ? existingContentKeys : candidates.map((candidate) => candidate.storageKey));
     if (!selectedKeys.length) throw new WorkPublicationServiceError("请至少选择一个作品媒体");
     for (const key of selectedKeys) if (!candidateMap.has(key)) throw new WorkPublicationServiceError("选择的媒体不属于当前来源", 400);

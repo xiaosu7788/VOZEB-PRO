@@ -1,56 +1,46 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ findPublicUserIdsByKeyword: vi.fn(), getCurrentUser: vi.fn(), getPublicUsersByIds: vi.fn(), getLocalMediaAssetSummary: vi.fn(), listLocalMediaAssets: vi.fn() }));
-
-vi.mock("@/lib/auth/session", () => ({ getCurrentUser: mocks.getCurrentUser }));
-vi.mock("@/lib/auth/store", () => ({ findPublicUserIdsByKeyword: mocks.findPublicUserIdsByKeyword, getPublicUsersByIds: mocks.getPublicUsersByIds }));
-vi.mock("@/lib/server/local-media-storage", () => ({
-    cleanupExpiredLocalMediaAssets: vi.fn(),
-    deleteLocalMediaAssets: vi.fn(),
-    getLocalMediaAssetSummary: mocks.getLocalMediaAssetSummary,
-    listLocalMediaAssets: mocks.listLocalMediaAssets,
+const mocks = vi.hoisted(() => ({
+    currentUser: vi.fn(),
+    readJsonBodyResult: vi.fn(),
+    hasAdminPermission: vi.fn(),
+    registrations: vi.fn(),
+    cascade: vi.fn(),
+    direct: vi.fn(),
 }));
 
-import { GET } from "./route";
+vi.mock("@/lib/auth/session", () => ({ getCurrentUser: mocks.currentUser }));
+vi.mock("@/lib/auth/request", () => ({ readJsonBodyResult: mocks.readJsonBodyResult }));
+vi.mock("@/lib/admin-permissions", () => ({ hasAdminPermission: mocks.hasAdminPermission }));
+vi.mock("@/lib/server/local-media-registry", () => ({ getLocalMediaRegistrations: mocks.registrations }));
+vi.mock("@/lib/server/user-media-deletion-service", () => ({ deleteUserMediaAssetsCascade: mocks.cascade }));
+vi.mock("@/lib/server/local-media-storage", () => ({
+    cleanupExpiredLocalMediaAssets: vi.fn(),
+    deleteLocalMediaAssets: mocks.direct,
+    decodeLocalMediaId: (id: string) => (id === "owned" ? { scope: "reference", relativePath: "permanent/owned.png" } : null),
+    getLocalMediaAssetSummary: vi.fn(),
+    listLocalMediaAssets: vi.fn(),
+}));
+vi.mock("@/lib/auth/store", () => ({ findPublicUserIdsByKeyword: vi.fn(), getPublicUsersByIds: vi.fn() }));
 
-describe("GET /api/admin/generation-assets", () => {
+import { DELETE } from "./route";
+
+describe("admin generation asset deletion", () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mocks.getCurrentUser.mockResolvedValue({ id: "admin", role: "admin", status: "active", adminPermissions: ["generation.read"] });
-        mocks.findPublicUserIdsByKeyword.mockResolvedValue([]);
-        mocks.getLocalMediaAssetSummary.mockResolvedValue({ totalFiles: 2, totalBytes: 30, permanentFiles: 2, permanentBytes: 30, temporaryFiles: 0, temporaryBytes: 0, expiredTemporaryFiles: 0 });
+        mocks.currentUser.mockResolvedValue({ id: "admin-one" });
+        mocks.hasAdminPermission.mockReturnValue(true);
+        mocks.readJsonBodyResult.mockResolvedValue({ ok: true, data: { ids: ["owned"] } });
+        mocks.registrations.mockResolvedValue([{ storageKey: "permanent/owned.png", ownerUserId: "user-one" }]);
+        mocks.cascade.mockResolvedValue({ deletedFiles: 1, deletedBytes: 8, removedReferences: 3, blocked: [] });
     });
 
-    it("returns summary-only data without loading media rows or users", async () => {
-        const response = await GET(new Request("http://localhost/api/admin/generation-assets?summaryOnly=1"));
+    it("uses administrator cascade deletion for owned media", async () => {
+        const response = await DELETE(new Request("http://localhost/api/admin/generation-assets", { method: "DELETE" }));
 
         expect(response.status).toBe(200);
-        expect(await response.json()).toMatchObject({ code: 0, data: { summary: { totalFiles: 2, totalBytes: 30 } }, msg: "OK" });
-        expect(mocks.getLocalMediaAssetSummary).toHaveBeenCalledTimes(1);
-        expect(mocks.listLocalMediaAssets).not.toHaveBeenCalled();
-        expect(mocks.getPublicUsersByIds).not.toHaveBeenCalled();
-    });
-
-    it("adds the public account id to registered media owners", async () => {
-        mocks.listLocalMediaAssets.mockResolvedValue({ items: [{ id: "asset-one", ownerUserId: "user-one" }], total: 1, page: 1, pageSize: 20, summary: {} });
-        mocks.getPublicUsersByIds.mockResolvedValue([{ id: "user-one", accountId: "0001", username: "creator", displayName: "创作者" }]);
-
-        const response = await GET(new Request("http://localhost/api/admin/generation-assets?page=1"));
-        const payload = await response.json();
-
-        expect(response.status).toBe(200);
-        expect(mocks.getPublicUsersByIds).toHaveBeenCalledWith(["user-one"]);
-        expect(payload.data.items[0]).toMatchObject({ ownerUserId: "user-one", ownerAccountId: "0001", ownerUsername: "creator", ownerDisplayName: "创作者" });
-    });
-
-    it("resolves public account-id search to internal media ownership", async () => {
-        mocks.findPublicUserIdsByKeyword.mockResolvedValue(["user-one"]);
-        mocks.listLocalMediaAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20, summary: {} });
-        mocks.getPublicUsersByIds.mockResolvedValue([]);
-
-        await GET(new Request("http://localhost/api/admin/generation-assets?search=0001"));
-
-        expect(mocks.findPublicUserIdsByKeyword).toHaveBeenCalledWith("0001");
-        expect(mocks.listLocalMediaAssets).toHaveBeenCalledWith(expect.objectContaining({ search: "0001", ownerUserIds: ["user-one"] }));
+        expect(mocks.cascade).toHaveBeenCalledWith("user-one", ["permanent/owned.png"]);
+        expect(mocks.direct).not.toHaveBeenCalled();
+        await expect(response.json()).resolves.toMatchObject({ data: { deletedFiles: 1, removedReferences: 3 } });
     });
 });

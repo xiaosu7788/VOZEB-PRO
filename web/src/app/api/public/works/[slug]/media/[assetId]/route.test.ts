@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     release: vi.fn(),
 }));
 
-vi.mock("@/lib/server/data-dir", () => ({ getServerDataDir: vi.fn(() => "C:/data") }));
+vi.mock("@/lib/server/data-dir", () => ({ getServerDataDir: vi.fn(() => "C:/data"), resolveServerDataPath: vi.fn((name: string) => `C:/data/${name}`) }));
 vi.mock("@/lib/server/local-media-response", () => ({ createLocalMediaResponse: mocks.stream, createMediaHeadResponse: mocks.head, mediaContentDisposition: vi.fn(() => "inline") }));
 vi.mock("@/lib/server/media-concurrency", () => ({ acquireMediaConcurrency: mocks.acquire, withMediaConcurrency: mocks.wrap }));
 vi.mock("@/lib/server/object-storage-service", () => ({ createExternalMediaReadUrl: mocks.externalUrl }));

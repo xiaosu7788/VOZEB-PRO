@@ -17,7 +17,7 @@
         "pree2e": "node scripts/prepare-e2e.mjs",
         "e2e": "playwright test",
         "sync:prompt-library": "node scripts/sync-awesome-gpt-image-2-prompts.mjs",
-        "reset:admin-password": "node scripts/reset-admin-password.mjs",
+        "reset:admin-password": "node --env-file-if-exists=.env.local scripts/reset-admin-password.mjs",
         "reset:admin-mfa": "node --env-file-if-exists=.env.local scripts/reset-admin-mfa.mjs",
         "check:release": "node scripts/release-check.mjs",
         "typecheck": "tsc --noEmit --pretty false",

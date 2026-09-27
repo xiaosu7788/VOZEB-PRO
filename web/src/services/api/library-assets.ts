@@ -6,9 +6,10 @@ export function listLibraryAssets() {
 
 export type LibraryAssetPage = { assets: Asset[]; total: number; page: number; pageSize: number };
 
-export function listLibraryAssetPage(input: { page: number; pageSize: number; kind?: Asset["kind"]; keyword?: string }, signal?: AbortSignal) {
+export function listLibraryAssetPage(input: { page: number; pageSize: number; kind?: Asset["kind"]; mediaOnly?: boolean; keyword?: string }, signal?: AbortSignal) {
     const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
     if (input.kind) query.set("kind", input.kind);
+    if (input.mediaOnly) query.set("mediaOnly", "1");
     if (input.keyword?.trim()) query.set("keyword", input.keyword.trim());
     return request<LibraryAssetPage>(`/api/library-assets?${query}`, { cache: "no-store", signal });
 }

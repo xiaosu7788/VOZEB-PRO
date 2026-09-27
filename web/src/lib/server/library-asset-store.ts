@@ -4,7 +4,7 @@ import { ensurePostgresSchema, getDatabaseProvider, postgresQuery } from "@/lib/
 
 type AssetRecord = { userId: string; asset: Asset };
 type AssetDatabase = { version: 1; assets: AssetRecord[] };
-export type LibraryAssetPageInput = { page: number; pageSize: number; kind?: Asset["kind"]; keyword?: string };
+export type LibraryAssetPageInput = { page: number; pageSize: number; kind?: Asset["kind"]; mediaOnly?: boolean; keyword?: string };
 export type LibraryAssetPage = LibraryAssetPageInput & { items: Asset[]; total: number };
 
 const FILE_NAME = "library-assets.json";
@@ -29,6 +29,7 @@ export async function listLibraryAssetPage(userId: string, input: LibraryAssetPa
                  FROM library_assets
                  WHERE user_id = $1
                    AND ($2::text IS NULL OR kind = $2)
+                   AND ($7::boolean = false OR kind <> 'text')
                    AND ($3::text = '' OR lower(concat_ws(' ', title, asset_json->>'source', asset_json->>'note', asset_json->'tags', asset_json->'data'->>'content', asset_json->'data'->>'mimeType')) LIKE $4)
              ), page_items AS (
                  SELECT id, updated_at, asset_json
@@ -38,7 +39,7 @@ export async function listLibraryAssetPage(userId: string, input: LibraryAssetPa
              )
              SELECT (SELECT count(*) FROM filtered) AS total,
                     COALESCE((SELECT jsonb_agg(asset_json ORDER BY updated_at DESC, id ASC) FROM page_items), '[]'::jsonb) AS assets`,
-            [userId, input.kind || null, keyword, `%${keyword}%`, input.pageSize, offset],
+            [userId, input.kind || null, keyword, `%${keyword}%`, input.pageSize, offset, input.mediaOnly === true],
         );
         const row = result.rows[0];
         return { ...input, items: Array.isArray(row?.assets) ? row.assets : [], total: Math.max(0, Number(row?.total) || 0) };
@@ -46,7 +47,7 @@ export async function listLibraryAssetPage(userId: string, input: LibraryAssetPa
     const filtered = (await readDatabase()).assets
         .filter((record) => record.userId === userId)
         .map((record) => record.asset)
-        .filter((asset) => (!input.kind || asset.kind === input.kind) && (!keyword || assetSearchText(asset).includes(keyword)))
+        .filter((asset) => (!input.kind || asset.kind === input.kind) && (!input.mediaOnly || asset.kind !== "text") && (!keyword || assetSearchText(asset).includes(keyword)))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
     return { ...input, items: filtered.slice(offset, offset + input.pageSize), total: filtered.length };
 }

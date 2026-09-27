@@ -12,6 +12,7 @@ export async function GET(request: Request) {
         page: params.get("page"),
         pageSize: params.get("pageSize"),
         kind: params.get("kind"),
+        mediaOnly: params.get("mediaOnly"),
         keyword: params.get("keyword"),
     });
     return NextResponse.json({ code: 0, data: { assets: page.items, total: page.total, page: page.page, pageSize: page.pageSize }, msg: "OK" });

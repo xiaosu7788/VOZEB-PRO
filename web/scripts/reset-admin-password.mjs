@@ -2,6 +2,7 @@ import { pbkdf2Sync, randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Client } from "pg";
 
 const HASH_ALGORITHM = "pbkdf2_sha256";
 const ITERATIONS = 210_000;
@@ -24,8 +25,8 @@ const dataDir = path.resolve(args.dataDir || process.env.VOZEB_PRO_DATA_DIR || p
 const authFile = path.join(dataDir, "auth.json");
 
 if (args.listAdmins) {
-    const db = await readAuthDb();
-    listAdmins(db);
+    if (databaseProvider() === "file") listAdmins((await readAuthDb()).users.filter((user) => user?.role === "admin"));
+    else await listPostgresAdmins();
     process.exit(0);
 }
 
@@ -37,22 +38,8 @@ if (args.password.length < 8) {
     fail("新密码至少需要 8 位。");
 }
 
-const db = await readAuthDb();
-const user = findAdminUser(db);
-const now = new Date().toISOString();
-const backupFile = await backupAuthFile();
-
-user.passwordHash = hashPassword(args.password);
-user.updatedAt = now;
-db.sessions = Array.isArray(db.sessions) ? db.sessions.filter((session) => session.userId !== user.id) : [];
-
-await writeAuthDb(db);
-const removedBackupCount = await prunePasswordResetBackups();
-
-console.log(`管理员密码已重置：${user.username} (${user.displayName || "未设置昵称"})`);
-console.log(`已清理该管理员旧登录会话，请使用新密码重新登录。`);
-console.log(`原始账号数据库已备份：${backupFile}`);
-if (removedBackupCount > 0) console.log(`已清理 ${removedBackupCount} 份旧密码重置备份，仅保留最近 ${PASSWORD_RESET_BACKUP_LIMIT} 份。`);
+if (databaseProvider() === "file") await resetFileProvider();
+else await resetPostgresProvider();
 
 function parseArgs(argv) {
     const parsed = {
@@ -114,6 +101,106 @@ async function readAuthDb() {
     } catch {
         fail(`${authFile} 不是有效的账号数据库 JSON。`);
     }
+}
+
+async function resetPostgresProvider() {
+    const connectionString = process.env.DATABASE_URL?.trim() || process.env.POSTGRES_URL?.trim() || "";
+    if (!connectionString) fail("PostgreSQL 模式缺少 DATABASE_URL 或 POSTGRES_URL。");
+    const client = new Client({ connectionString, ssl: postgresSslConfig() });
+    await client.connect();
+    try {
+        const selector = adminSelector();
+        const passwordHash = hashPassword(args.password);
+        await client.query("BEGIN");
+        const result = await client.query(`SELECT id, username, display_name FROM vozeb_pro_users WHERE role = 'admin' AND ${selector.sql} FOR UPDATE`, selector.values);
+        const user = exactAdmin(result.rows.map(mapPostgresAdmin));
+        await client.query("UPDATE vozeb_pro_users SET password_hash = $2, updated_at = now() WHERE id = $1", [user.id, passwordHash]);
+        await client.query("DELETE FROM vozeb_pro_sessions WHERE user_id = $1", [user.id]);
+        await client.query("COMMIT");
+        console.log(`管理员密码已重置：${user.username} (${user.displayName || "未设置昵称"})`);
+        console.log("已清理该管理员旧登录会话，请使用新密码重新登录。");
+    } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+    } finally {
+        await client.end();
+    }
+}
+
+async function listPostgresAdmins() {
+    const connectionString = process.env.DATABASE_URL?.trim() || process.env.POSTGRES_URL?.trim() || "";
+    if (!connectionString) fail("PostgreSQL 模式缺少 DATABASE_URL 或 POSTGRES_URL。");
+    const client = new Client({ connectionString, ssl: postgresSslConfig() });
+    await client.connect();
+    try {
+        listAdmins((await client.query("SELECT id, username, email, status, display_name FROM vozeb_pro_users WHERE role = 'admin' ORDER BY created_at ASC")).rows.map(mapPostgresAdmin));
+    } finally {
+        await client.end();
+    }
+}
+
+async function resetFileProvider() {
+    const db = await readAuthDb();
+    const user = findAdminUser(db);
+    const backupFile = await backupAuthFile();
+
+    user.passwordHash = hashPassword(args.password);
+    user.updatedAt = new Date().toISOString();
+    db.sessions = Array.isArray(db.sessions) ? db.sessions.filter((session) => session.userId !== user.id) : [];
+
+    await writeAuthDb(db);
+    const removedBackupCount = await prunePasswordResetBackups();
+
+    console.log(`管理员密码已重置：${user.username} (${user.displayName || "未设置昵称"})`);
+    console.log("已清理该管理员旧登录会话，请使用新密码重新登录。");
+    console.log(`原始账号数据库已备份：${backupFile}`);
+    if (removedBackupCount > 0) console.log(`已清理 ${removedBackupCount} 份旧密码重置备份，仅保留最近 ${PASSWORD_RESET_BACKUP_LIMIT} 份。`);
+}
+
+function adminSelector() {
+    const clauses = [];
+    const values = [];
+    if (args.id) {
+        values.push(args.id);
+        clauses.push(`id = $${values.length}`);
+    }
+    if (args.username) {
+        values.push(args.username);
+        clauses.push(`lower(username) = $${values.length}`);
+    }
+    if (args.email) {
+        values.push(args.email);
+        clauses.push(`lower(coalesce(email, '')) = $${values.length}`);
+    }
+    if (!clauses.length) fail("为避免误改账号，重置密码必须指定 --username、--email 或 --id。");
+    return { sql: clauses.join(" AND "), values };
+}
+
+function exactAdmin(users) {
+    if (users.length === 1) return users[0];
+    if (!users.length) fail("没有找到匹配的管理员账号，请检查 --username、--email 或 --id。");
+    fail("匹配到多个管理员账号，请增加筛选条件精确指定。");
+}
+
+function mapPostgresAdmin(row) {
+    return {
+        id: row.id || "",
+        username: row.username || "",
+        email: row.email || "",
+        status: row.status || "",
+        displayName: row.display_name || "",
+    };
+}
+
+function databaseProvider() {
+    return process.env.VOZEB_PRO_DATABASE_PROVIDER?.trim().toLowerCase() === "file" ? "file" : "postgres";
+}
+
+function postgresSslConfig() {
+    if (!["1", "true", "yes", "on"].includes(process.env.VOZEB_PRO_DATABASE_SSL?.trim().toLowerCase() || "")) return undefined;
+    const rejectUnauthorized = !["0", "false", "no", "off"].includes(process.env.VOZEB_PRO_DATABASE_SSL_REJECT_UNAUTHORIZED?.trim().toLowerCase() || "");
+    const ca = process.env.VOZEB_PRO_DATABASE_SSL_CA?.trim().replace(/\\n/g, "\n") || "";
+    return { rejectUnauthorized, ...(ca ? { ca } : {}) };
 }
 
 function findAdminUser(db) {
@@ -178,8 +265,7 @@ function hashPassword(password) {
     return `${HASH_ALGORITHM}$${ITERATIONS}$${salt}$${hash}`;
 }
 
-function listAdmins(db) {
-    const admins = db.users.filter((user) => user?.role === "admin");
+function listAdmins(admins) {
     if (!admins.length) {
         console.log("未找到管理员账号。");
         return;

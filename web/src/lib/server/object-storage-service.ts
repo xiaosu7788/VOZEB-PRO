@@ -67,6 +67,13 @@ export async function createExternalMediaReadUrl(request: Request, registration:
     });
 }
 
+export async function readExternalMediaBytes(registration: LocalMediaRegistration) {
+    if (registration.storageProvider !== "object" || !registration.externalObjectKey) throw new Error("媒体不是外部对象存储文件");
+    const config = await getObjectStorageRuntimeConfig();
+    assertRegistrationConfig(config, registration);
+    return getObjectBytes(config, registration.externalObjectKey);
+}
+
 export async function createExternalStorageImagePreviewUrl(objectKey: string, width: unknown) {
     const config = await getObjectStorageRuntimeConfig();
     assertObjectStorageConfigured(config);

@@ -1,5 +1,7 @@
 import { creativeConversationSourceForSurface, isCreativeConversationSourceCompatible, normalizeCreativeConversationSource, normalizeCreativeSurface, type CreativeAssetType, type CreativeConversationStatus } from "@/lib/creative-runtime-contract";
 import { CREATIVE_UPLOAD_MAX_BYTES, isCreativeUploadMimeType } from "@/lib/creative-upload";
+import { copyFile, mkdir, stat, unlink } from "node:fs/promises";
+import { dirname, extname, resolve, sep } from "node:path";
 import {
     createCreativeConversation,
     getCreativeAsset,
@@ -11,8 +13,14 @@ import {
     registerCreativeAssets,
     updateCreativeConversation,
 } from "@/lib/server/creative-runtime-store";
-import { writePersistentMediaDataUrl } from "@/lib/server/reference-asset-store";
 import { deleteCreativeConversationAggregates } from "@/lib/server/creative-entity-deletion-store";
+import type { Asset, TextAsset } from "@/lib/library-asset-contract";
+import { resolveServerDataPath } from "@/lib/server/data-dir";
+import { getLibraryAsset } from "@/lib/server/library-asset-store";
+import { createDatedMediaPath, REFERENCE_MEDIA_ROOT } from "@/lib/server/local-media-storage";
+import { getLocalMediaRegistration, registerLocalMediaAsset, type LocalMediaRegistration } from "@/lib/server/local-media-registry";
+import { persistExternalMediaIfEnabled, readExternalMediaBytes } from "@/lib/server/object-storage-service";
+import { readReferenceAsset, writePersistentMediaDataUrl } from "@/lib/server/reference-asset-store";
 import { deleteUserMediaAssetsCascade } from "@/lib/server/user-media-deletion-service";
 
 export class CreativeRuntimeServiceError extends Error {
@@ -123,6 +131,95 @@ export async function uploadAssetForUser(userId: string, conversationId: string,
         },
     ]);
     return asset;
+}
+
+export async function insertLibraryAssetForUser(userId: string, conversationId: string, libraryAssetId: string) {
+    const id = libraryAssetId.trim();
+    if (!id) throw new CreativeRuntimeServiceError("素材标识不能为空", 400);
+    const conversation = await getConversationForUser(userId, conversationId);
+    if (conversation.status !== "active") throw new CreativeRuntimeServiceError("已归档会话不能插入素材", 409);
+    const libraryAsset = await getLibraryAsset(userId, id);
+    if (!libraryAsset || libraryAsset.kind === "text") throw new CreativeRuntimeServiceError("素材不存在", 404);
+    const type = creativeAssetType(libraryAsset.data.mimeType);
+    if (!type) throw new CreativeRuntimeServiceError("仅支持图片、视频和音频素材", 400);
+    let stored;
+    try {
+        stored = await cloneLibraryMedia(userId, conversationId, libraryAsset);
+    } catch (error) {
+        throw new CreativeRuntimeServiceError(error instanceof Error ? error.message : "素材插入失败", 400);
+    }
+    const url = `/api/reference-assets/${stored.token}`;
+    const remoteUrl = /^https?:\/\//i.test(url) ? url : undefined;
+    const [asset] = await registerCreativeAssets([
+        {
+            userId,
+            conversationId,
+            sourceRunId: "library-insert",
+            sourceTaskId: stored.token,
+            ordinal: 0,
+            type,
+            title: libraryAsset.title,
+            storageKind: stored.storage === "object" ? "object" : "local",
+            storageKey: stored.token,
+            remoteUrl,
+            serverUrl: remoteUrl ? undefined : url,
+            mimeType: stored.mimeType,
+            bytes: stored.bytes,
+            metadata: { source: "library", libraryAssetId: id, originalName: libraryAsset.title, storageClass: "permanent" },
+        },
+    ]);
+    return asset;
+}
+async function cloneLibraryMedia(userId: string, conversationId: string, libraryAsset: Exclude<Asset, TextAsset>) {
+    const source = await getLocalMediaRegistration(libraryAsset.data.storageKey || "");
+    if (!source || source.ownerUserId !== userId) throw new Error("素材文件不存在");
+    const type = creativeAssetType(source.mimeType);
+    if (!type) throw new Error("仅支持图片、视频和音频素材");
+    const extension = extname(source.storageKey).toLowerCase() || ".bin";
+    const storageKey = createDatedMediaPath("permanent", type, extension);
+    const registration = {
+        storageKey,
+        scope: "reference" as const,
+        storageClass: "permanent" as const,
+        type,
+        ownerUserId: userId,
+        originalName: libraryAsset.title,
+        source: "creative-upload",
+        conversationId,
+        mimeType: source.mimeType,
+        bytes: source.bytes,
+    };
+    if (source.storageProvider === "object" && source.externalObjectKey) {
+        const external = await persistExternalMediaIfEnabled({ registration, bytes: await readExternalMediaBytes(source) });
+        if (!external) throw new Error("素材保存失败");
+        return { token: external.storageKey, bytes: external.bytes, mimeType: external.mimeType, storage: "object" as const };
+    }
+    const sourcePath = await libraryMediaPath(source);
+    const targetPath = safeReferencePath(storageKey);
+    if (!sourcePath || !targetPath) throw new Error("素材文件不存在");
+    await mkdir(dirname(targetPath), { recursive: true });
+    await copyFile(sourcePath, targetPath);
+    try {
+        await registerLocalMediaAsset(registration);
+    } catch (error) {
+        await unlink(targetPath).catch(() => undefined);
+        throw error;
+    }
+    return { token: storageKey, bytes: source.bytes, mimeType: source.mimeType, storage: "local" as const };
+}
+
+async function libraryMediaPath(registration: LocalMediaRegistration) {
+    if (registration.scope === "reference") return (await readReferenceAsset(registration.storageKey))?.filePath || null;
+    const root = resolveServerDataPath("generation-assets");
+    const filePath = resolve(root, registration.storageKey);
+    if (filePath === root || !filePath.startsWith(`${root}${sep}`)) return null;
+    const info = await stat(filePath).catch(() => null);
+    return info?.isFile() ? filePath : null;
+}
+
+function safeReferencePath(storageKey: string) {
+    const filePath = resolve(REFERENCE_MEDIA_ROOT, storageKey);
+    return filePath === REFERENCE_MEDIA_ROOT || !filePath.startsWith(`${REFERENCE_MEDIA_ROOT}${sep}`) ? null : filePath;
 }
 
 export async function registerGenerationTaskAssetsForUser(
