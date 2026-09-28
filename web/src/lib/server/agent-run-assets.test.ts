@@ -33,12 +33,7 @@ describe("registerAgentTaskAssets", () => {
     });
 
     it("persists a dataUrl-only provider result as a local asset", async () => {
-        await registerAgentTaskAssets(
-            run(),
-            { ...task(), type: "image", title: "图片" },
-            { data: { results: [{ dataUrl: "data:image/png;base64,dGVzdA==" }] } },
-            ["image-task-one"],
-        );
+        await registerAgentTaskAssets(run(), { ...task(), type: "image", title: "图片" }, { data: { results: [{ dataUrl: "data:image/png;base64,dGVzdA==" }] } }, ["image-task-one"]);
 
         expect(mocks.registerCreativeAssets).toHaveBeenCalledWith([expect.objectContaining({ type: "image", serverUrl: "/api/generation-log-assets/persisted.png" })]);
     });
