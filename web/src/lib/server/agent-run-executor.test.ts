@@ -33,6 +33,7 @@ vi.mock("@/lib/server/creative-runtime-store", () => ({
     registerCreativeAssets: mocks.registerCreativeAssets,
 }));
 vi.mock("@/lib/server/generation-task-store", () => ({ linkStoredGenerationTask: mocks.linkStoredGenerationTask }));
+vi.mock("@/lib/server/generation-log-repository", () => ({ writeDataUrlAsset: vi.fn(async () => null) }));
 vi.mock("@/lib/server/generation-task-scheduler", () => ({ scheduleGenerationTask: mocks.scheduleGenerationTask }));
 vi.mock("@/lib/server/creative-review-service", () => ({ reviewCreativeOutputs: mocks.reviewCreativeOutputs }));
 vi.mock("@/lib/server/agent-run-store", async (importOriginal) => {
