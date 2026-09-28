@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resolve } from "node:path";
 
 const mocks = vi.hoisted(() => ({
     getCreativeConversation: vi.fn(),
@@ -45,7 +46,7 @@ vi.mock("@/lib/server/object-storage-service", () => ({
 vi.mock("@/lib/server/data-dir", () => ({ resolveServerDataPath: vi.fn((name: string) => `data/${name}`) }));
 vi.mock("@/lib/server/local-media-storage", () => ({
     createDatedMediaPath: vi.fn(() => "permanent/2026/01/01/images/new.png"),
-    REFERENCE_MEDIA_ROOT: "D:\\tmp\\reference-assets",
+    REFERENCE_MEDIA_ROOT: resolve(process.cwd(), "tmp/vozeb-pro-reference-assets"),
 }));
 vi.mock("node:fs/promises", () => ({
     copyFile: mocks.copyFile,
@@ -55,6 +56,7 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 import { deleteConversationsForUser, insertLibraryAssetForUser, registerGenerationTaskAssetsForUser, uploadAssetForUser } from "./creative-runtime-service";
+import { REFERENCE_MEDIA_ROOT } from "@/lib/server/local-media-storage";
 
 function file(name: string, type: string, size = 4): File {
     return { name, type, size, arrayBuffer: async () => new Uint8Array(Math.min(size, 4)).buffer } as File;
@@ -87,7 +89,7 @@ describe("创作会话素材上传", () => {
         mocks.registerLocalMediaAsset.mockReset().mockImplementation(async (input) => ({ ...input, createdAt: "2026-01-01T00:00:00.000Z" }));
         mocks.persistExternalMediaIfEnabled.mockReset().mockResolvedValue(null);
         mocks.readExternalMediaBytes.mockReset().mockResolvedValue(Buffer.from("image"));
-        mocks.readReferenceAsset.mockReset().mockResolvedValue({ filePath: "D:\\tmp\\reference-assets\\permanent\\source.png", size: 4 });
+        mocks.readReferenceAsset.mockReset().mockResolvedValue({ filePath: resolve(REFERENCE_MEDIA_ROOT, "permanent/source.png"), size: 4 });
         mocks.copyFile.mockReset().mockResolvedValue(undefined);
         mocks.mkdir.mockReset().mockResolvedValue(undefined);
         mocks.stat.mockReset().mockResolvedValue({ isFile: () => true });
@@ -155,7 +157,7 @@ describe("创作会话素材上传", () => {
 
         const asset = await insertLibraryAssetForUser("user-one", "conversation-one", "library-one");
 
-        expect(mocks.copyFile).toHaveBeenCalledWith("D:\\tmp\\reference-assets\\permanent\\source.png", "D:\\tmp\\reference-assets\\permanent\\2026\\01\\01\\images\\new.png");
+        expect(mocks.copyFile).toHaveBeenCalledWith(resolve(REFERENCE_MEDIA_ROOT, "permanent/source.png"), resolve(REFERENCE_MEDIA_ROOT, "permanent/2026/01/01/images/new.png"));
         expect(mocks.registerLocalMediaAsset).toHaveBeenCalledWith(expect.objectContaining({ storageKey: "permanent/2026/01/01/images/new.png", ownerUserId: "user-one", conversationId: "conversation-one", source: "creative-upload" }));
         expect(asset).toMatchObject({
             id: "asset-one",
