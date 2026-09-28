@@ -99,7 +99,7 @@ export function CreativeAssetsPanel({
                 total: payload.total,
                 loading: false,
                 loaded: true,
-                error: ""
+                error: "",
             }));
         } catch (error) {
             setMediaLibrary((current) => ({ ...current, loading: false, loaded: true, error: error instanceof Error ? error.message : "素材加载失败" }));
@@ -144,7 +144,7 @@ export function CreativeAssetsPanel({
                         {
                             key: "media",
                             label: <TabLabel text="素材库" count={mediaLibrary.loaded ? mediaLibrary.total : undefined} />,
-                            children: <MediaLibraryList collection={mediaLibrary} onInsert={(item) => onInsertAsset(item)} onRetry={() => void loadMediaLibraryPage(1)} onLoadMore={() => void loadMediaLibraryPage(mediaLibrary.page + 1)} />
+                            children: <MediaLibraryList collection={mediaLibrary} onInsert={(item) => onInsertAsset(item)} onRetry={() => void loadMediaLibraryPage(1)} onLoadMore={() => void loadMediaLibraryPage(mediaLibrary.page + 1)} />,
                         },
                         {
                             key: "my",
@@ -318,11 +318,11 @@ export function MediaLibraryList({ collection, onInsert, onRetry, onLoadMore }: 
                 <PanelEmpty
                     icon={<RefreshCw className="size-5" />}
                     text={collection.error}
-                    action={(
+                    action={
                         <Button size="small" type="text" icon={<RefreshCw className="size-3.5" />} onClick={onRetry}>
                             重新加载
                         </Button>
-                    )}
+                    }
                 />
             ) : !collection.items.length ? (
                 <PanelEmpty icon={<ImageIcon className="size-5" />} text="暂无可用素材" />

@@ -446,7 +446,8 @@ export default function CreatePage() {
             message.success("已插入提示词");
             return;
         }
-        void agent.insertLibraryAsset(asset.id)
+        void agent
+            .insertLibraryAsset(asset.id)
             .then(() => message.success("已插入素材"))
             .catch((error) => message.error(error instanceof Error ? error.message : "插入素材失败"));
     };

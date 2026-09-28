@@ -17,7 +17,13 @@ export async function clonePublishedWorkAssets(ownerUserId: string, workId: stri
             if (!source) throw new Error("公开作品媒体不存在，无法创建专属副本");
             const copy = await clonePublishedWorkMedia(source, ownerUserId, workId);
             clonedKeys.push(copy.storageKey);
-            cloned.push({ ...asset, storageKey: copy.storageKey, mimeType: copy.mimeType, metadata: { originalName: copy.originalName || source.originalName || asset.storageKey.split("/").at(-1) || "媒体", bytes: copy.bytes }, createdAt: new Date().toISOString() });
+            cloned.push({
+                ...asset,
+                storageKey: copy.storageKey,
+                mimeType: copy.mimeType,
+                metadata: { originalName: copy.originalName || source.originalName || asset.storageKey.split("/").at(-1) || "媒体", bytes: copy.bytes },
+                createdAt: new Date().toISOString(),
+            });
         }
         return { assets: cloned, storageKeys: clonedKeys };
     } catch (error) {

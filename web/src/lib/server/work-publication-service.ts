@@ -317,29 +317,29 @@ export async function reviewWorkPublication(input: { reviewerUserId: unknown; wo
     let copiedKeys: string[] = [];
     try {
         return await withPostgresTransaction(async (client) => {
-        const repos = createPostgresRepositories(client);
-        const work = await repos.workPublications.getWorkById(workId, undefined, true);
-        if (!work) throw new WorkPublicationServiceError("作品不存在", 404);
-        if (work.lifecycleStatus !== "active") throw new WorkPublicationServiceError("作品已下架", 409);
-        const version = await repos.workPublications.getVersionById(versionId, true);
-        if (!version || version.workId !== work.id) throw new WorkPublicationServiceError("作品版本不存在", 404);
-        if (work.currentVersionId !== version.id) throw new WorkPublicationServiceError("只能审核作品当前版本", 409);
-        if (version.moderationStatus === decision) return requiredWorkDetail(repos, work.id);
-        const reviewed = await repos.workPublications.reviewVersion(version.id, {
-            status: decision,
-            reason: decision === "rejected" ? reason : undefined,
-            reviewedAt: new Date().toISOString(),
-            reviewedByUserId: reviewerUserId,
-        });
-        if (!reviewed) throw new WorkPublicationServiceError("作品状态已变化，请刷新后重试", 409);
-        if (decision === "approved") {
-            const currentAssets = await repos.workPublications.listVersionAssets(version.id);
-            const copied = await clonePublishedWorkAssets(work.ownerUserId, work.id, currentAssets);
-            copiedKeys = copied.storageKeys;
-            await repos.workPublications.replaceVersionAssets(version.id, copied.assets);
-            if (!(await repos.workPublications.setPublishedVersion(work.id, version.id))) throw new WorkPublicationServiceError("公开版本切换失败", 409);
-        }
-        return requiredWorkDetail(repos, work.id);
+            const repos = createPostgresRepositories(client);
+            const work = await repos.workPublications.getWorkById(workId, undefined, true);
+            if (!work) throw new WorkPublicationServiceError("作品不存在", 404);
+            if (work.lifecycleStatus !== "active") throw new WorkPublicationServiceError("作品已下架", 409);
+            const version = await repos.workPublications.getVersionById(versionId, true);
+            if (!version || version.workId !== work.id) throw new WorkPublicationServiceError("作品版本不存在", 404);
+            if (work.currentVersionId !== version.id) throw new WorkPublicationServiceError("只能审核作品当前版本", 409);
+            if (version.moderationStatus === decision) return requiredWorkDetail(repos, work.id);
+            const reviewed = await repos.workPublications.reviewVersion(version.id, {
+                status: decision,
+                reason: decision === "rejected" ? reason : undefined,
+                reviewedAt: new Date().toISOString(),
+                reviewedByUserId: reviewerUserId,
+            });
+            if (!reviewed) throw new WorkPublicationServiceError("作品状态已变化，请刷新后重试", 409);
+            if (decision === "approved") {
+                const currentAssets = await repos.workPublications.listVersionAssets(version.id);
+                const copied = await clonePublishedWorkAssets(work.ownerUserId, work.id, currentAssets);
+                copiedKeys = copied.storageKeys;
+                await repos.workPublications.replaceVersionAssets(version.id, copied.assets);
+                if (!(await repos.workPublications.setPublishedVersion(work.id, version.id))) throw new WorkPublicationServiceError("公开版本切换失败", 409);
+            }
+            return requiredWorkDetail(repos, work.id);
         });
     } catch (error) {
         await deletePublishedWorkMediaFiles(copiedKeys);

@@ -41,5 +41,4 @@ describe("library assets route", () => {
 
         expect(mocks.listPage).toHaveBeenCalledWith("user-one", { page: null, pageSize: null, kind: null, mediaOnly: "1", keyword: null });
     });
-
 });

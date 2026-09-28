@@ -45,14 +45,7 @@ const libraryImage: Asset = {
 
 describe("CreativeAssetsPanel", () => {
     it("renders media library assets as compact four-column insert commands", () => {
-        const markup = renderToStaticMarkup(
-            <MediaLibraryList
-                collection={{ items: [libraryImage], page: 1, total: 1, loading: false, loaded: true, error: "" }}
-                onInsert={() => undefined}
-                onRetry={() => undefined}
-                onLoadMore={() => undefined}
-            />,
-        );
+        const markup = renderToStaticMarkup(<MediaLibraryList collection={{ items: [libraryImage], page: 1, total: 1, loading: false, loaded: true, error: "" }} onInsert={() => undefined} onRetry={() => undefined} onLoadMore={() => undefined} />);
 
         expect(markup).toContain('data-testid="creative-library-assets"');
         expect(markup).toContain("grid-cols-4");
