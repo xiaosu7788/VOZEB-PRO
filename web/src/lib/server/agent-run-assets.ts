@@ -1,16 +1,17 @@
 import { registerCreativeAssets } from "@/lib/server/creative-runtime-store";
 import { agentTaskResultItems } from "@/lib/server/agent-run-result-items";
 import type { AgentRun, AgentRunTask } from "@/lib/server/agent-run-store";
+import { writeDataUrlAsset } from "@/lib/server/generation-log-repository";
 
 export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask, result: unknown, sourceTaskIds: string[]) {
-    const records: Array<{ record: Record<string, unknown>; textContent?: string; location?: NonNullable<ReturnType<typeof persistentMediaLocation>> }> = [];
+    const records: Array<{ record: Record<string, unknown>; textContent?: string; location?: NonNullable<Awaited<ReturnType<typeof persistentMediaLocation>>> }> = [];
     for (const record of agentTaskResultItems(result)) {
         if (task.type === "text") {
             const textContent = typeof record.content === "string" ? record.content.trim() : "";
             if (textContent) records.push({ record, textContent });
             continue;
         }
-        const location = persistentMediaLocation(record);
+        const location = await persistentMediaLocation(record, task, run);
         if (location) records.push({ record, location });
     }
     const inputs: Parameters<typeof registerCreativeAssets>[0] = [];
@@ -47,7 +48,12 @@ export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask,
     return registerCreativeAssets(inputs);
 }
 
-function persistentMediaLocation(record: Record<string, unknown>) {
+async function persistentMediaLocation(record: Record<string, unknown>, task: AgentRunTask, run: AgentRun) {
+    const dataUrl = cleanResultText(record.dataUrl);
+    if (dataUrl && (task.type === "image" || task.type === "video") && !cleanResultText(record.storageKey)) {
+        const stored = await writeDataUrlAsset(dataUrl, task.type, { ownerUserId: run.userId, source: "agent", conversationId: run.conversationId, taskId: task.id });
+        if (stored) Object.assign(record, { serverUrl: stored.serverUrl, mimeType: record.mimeType || stored.mimeType, width: record.width || stored.width, height: record.height || stored.height, bytes: record.bytes || stored.bytes });
+    }
     const storageKey = cleanResultText(record.storageKey);
     const explicitKind = record.storageKind === "local" || record.storageKind === "object" || record.storageKind === "remote" ? record.storageKind : undefined;
     const rawUrl = cleanPersistentUrl(record.url);

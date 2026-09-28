@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
 
-const mocks = vi.hoisted(() => ({ registerCreativeAssets: vi.fn() }));
+const mocks = vi.hoisted(() => ({ registerCreativeAssets: vi.fn(), writeDataUrlAsset: vi.fn() }));
+
+vi.mock("@/lib/server/generation-log-repository", () => ({ writeDataUrlAsset: mocks.writeDataUrlAsset }));
 
 vi.mock("@/lib/server/creative-runtime-store", () => ({ registerCreativeAssets: mocks.registerCreativeAssets }));
 
@@ -10,6 +12,7 @@ import { registerAgentTaskAssets } from "./agent-run-assets";
 
 describe("registerAgentTaskAssets", () => {
     beforeEach(() => {
+        mocks.writeDataUrlAsset.mockReset().mockResolvedValue({ serverUrl: "/api/generation-log-assets/persisted.png", mimeType: "image/png", width: 1024, height: 1024, bytes: 4 });
         mocks.registerCreativeAssets.mockReset().mockImplementation(async (inputs: Array<Record<string, unknown>>) => inputs);
     });
 
@@ -27,6 +30,17 @@ describe("registerAgentTaskAssets", () => {
                 textContent: content,
             }),
         ]);
+    });
+
+    it("persists a dataUrl-only provider result as a local asset", async () => {
+        await registerAgentTaskAssets(
+            run(),
+            { ...task(), type: "image", title: "图片" },
+            { data: { results: [{ dataUrl: "data:image/png;base64,dGVzdA==" }] } },
+            ["image-task-one"],
+        );
+
+        expect(mocks.registerCreativeAssets).toHaveBeenCalledWith([expect.objectContaining({ type: "image", serverUrl: "/api/generation-log-assets/persisted.png" })]);
     });
 
     it("normalizes multiple provider results and keeps public playback metadata", async () => {
