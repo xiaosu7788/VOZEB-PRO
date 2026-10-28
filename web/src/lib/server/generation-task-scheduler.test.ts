@@ -63,6 +63,20 @@ describe("generation task scheduler", () => {
         });
     });
 
+    it("wakes a waiting parent Agent as soon as a child task reaches a terminal phase", async () => {
+        mocks.records = [
+            { ...record("agent-run", 60_000), type: "agent", status: "running", executionPhase: "polling" },
+            { ...record("image-child", 1_000), status: "running", workerId: "worker-one", leaseUntil: 60_000, runId: "agent-run" },
+        ];
+        const before = Date.now();
+
+        await releaseGenerationTaskLease("image", "image-child", "worker-one", { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "persisted" });
+
+        const agent = mocks.records.find((item) => item.id === "agent-run");
+        expect(agent?.nextPollAt).toBeGreaterThanOrEqual(before);
+        expect(agent?.nextPollAt).toBeLessThan(before + 10_000);
+    });
+
     it("preserves upstream identity while moving a result into persistence", async () => {
         await scheduleGenerationTask("image", "due", { executionPhase: "submitted", upstreamTaskId: "upstream-one", channelId: "channel-one", submittedAt: 500, nextPollAt: 1_500 });
         await scheduleGenerationTask("image", "due", { executionPhase: "result_ready", resultPayload: { url: "https://cdn.example/result.png" }, nextPollAt: 1_000 });
@@ -118,6 +132,31 @@ describe("generation task scheduler", () => {
         expect(mocks.postgresQuery.mock.calls[0]?.[1]).toHaveLength(15);
         expect(String(mocks.postgresQuery.mock.calls[1]?.[0])).toContain("min(GREATEST(next_poll_at");
         expect(mocks.postgresQuery.mock.calls[1]?.[1]).toEqual([["image", "video", "audio", "text", "agent"], new Date(1_000)]);
+    });
+
+    it("wakes the parent Agent after a PostgreSQL child release completes", async () => {
+        mocks.provider = "postgres";
+        mocks.postgresQuery
+            .mockResolvedValueOnce({
+                rows: [
+                    {
+                        id: "image-child",
+                        user_id: "user-one",
+                        task_type: "image",
+                        status: "running",
+                        payload: {},
+                        run_id: "agent-run",
+                        execution_phase: "completed",
+                        next_poll_at: null,
+                    },
+                ],
+            })
+            .mockResolvedValueOnce({ rows: [] });
+
+        await releaseGenerationTaskLease("image", "image-child", "worker-one", { executionPhase: "completed", nextPollAt: undefined });
+
+        expect(String(mocks.postgresQuery.mock.calls[1]?.[0])).toContain("UPDATE generation_tasks");
+        expect(mocks.postgresQuery.mock.calls[1]?.[1]).toEqual(expect.arrayContaining(["agent-run", "agent"]));
     });
 
     it("uses adaptive polling and bounded network-error backoff", () => {

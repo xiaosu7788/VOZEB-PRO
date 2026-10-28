@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { App } from "antd";
 import { usePathname } from "next/navigation";
 
@@ -16,32 +16,53 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const installRoute = pathname === "/install";
     const setConfig = useConfigStore((state) => state.setConfig);
     const setUser = useUserStore((state) => state.setUser);
+    const mountedRef = useRef(true);
+    const hydrateRevisionRef = useRef(0);
+    const previousPathnameRef = useRef(pathname);
 
-    useEffect(() => {
-        if (installRoute) return;
-        let cancelled = false;
-        const hydrate = (force = false) => {
+    const hydrate = useCallback(
+        (force = false) => {
+            const revision = ++hydrateRevisionRef.current;
             void loadPublicSession({ force })
                 .then((payload) => {
-                    if (cancelled) return;
+                    if (!mountedRef.current || revision !== hydrateRevisionRef.current) return;
                     setUser(payload.user || null);
                     setConfig(applyPublicSystemSettings(useConfigStore.getState().config, payload.settings));
                 })
                 .catch(() => undefined);
+        },
+        [setConfig, setUser],
+    );
+
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            hydrateRevisionRef.current += 1;
         };
+    }, []);
+
+    useEffect(() => {
+        if (installRoute) return;
+        hydrate();
         const handleSettingsChanged = () => hydrate(true);
         const handleVisibilityChange = () => {
             if (document.visibilityState === "visible") hydrate(true);
         };
-        hydrate();
         window.addEventListener(PUBLIC_SETTINGS_CHANGED_EVENT, handleSettingsChanged);
         document.addEventListener("visibilitychange", handleVisibilityChange);
         return () => {
-            cancelled = true;
             window.removeEventListener(PUBLIC_SETTINGS_CHANGED_EVENT, handleSettingsChanged);
             document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
-    }, [installRoute, setConfig, setUser]);
+    }, [hydrate, installRoute]);
+
+    useEffect(() => {
+        const previousPathname = previousPathnameRef.current;
+        previousPathnameRef.current = pathname;
+        if (installRoute || pathname.startsWith("/admin") || !previousPathname.startsWith("/admin")) return;
+        hydrate(true);
+    }, [hydrate, installRoute, pathname]);
 
     useEffect(() => {
         const handleMissingConfig = () => {

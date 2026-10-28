@@ -23,6 +23,7 @@ export type GenerationTaskLease = Pick<
     | "workerId"
     | "leaseUntil"
     | "lastHeartbeatAt"
+    | "runId"
 >;
 
 export type GenerationTaskSchedulePatch = Partial<Pick<GenerationTaskLease, "executionPhase" | "upstreamTaskId" | "channelId" | "provider" | "queryPath" | "submittedAt" | "nextPollAt" | "lastPollAt" | "lastUpstreamStatus" | "resultPayload">>;
@@ -177,9 +178,11 @@ export async function releaseGenerationTaskLease(type: GenerationTaskType, id: s
              RETURNING *`,
             [id, type, owner, ...scheduleValues("", type, normalized).slice(2), options.cancellation === true, options.resetUpstreamIdentity === true],
         );
-        return result.rows[0] ? mapLease(result.rows[0]) : null;
+        const released = result.rows[0] ? mapLease(result.rows[0]) : null;
+        await wakeParentAgentRun(released, normalized);
+        return released;
     }
-    return withGenerationTaskFileMutation(async (tasks) => {
+    const released = await withGenerationTaskFileMutation<GenerationTaskLease | null>(async (tasks) => {
         let result: GenerationTaskLease | null = null;
         const next = tasks.map((task) => {
             if (task.id !== id || task.type !== type || task.workerId !== owner) return task;
@@ -196,6 +199,18 @@ export async function releaseGenerationTaskLease(type: GenerationTaskType, id: s
         });
         return { tasks: next, result };
     });
+    await wakeParentAgentRun(released, normalized);
+    return released;
+}
+
+async function wakeParentAgentRun(released: GenerationTaskLease | null, patch: GenerationTaskSchedulePatch) {
+    if (!released || released.type === "agent" || !released.runId) return;
+    if (patch.executionPhase !== "completed" && patch.executionPhase !== "needs_review") return;
+    try {
+        await scheduleGenerationTask("agent", released.runId, { nextPollAt: Date.now() });
+    } catch (error) {
+        console.error("Parent Agent wake failed", { runId: released.runId, error: error instanceof Error ? error.message : error });
+    }
 }
 
 export function generationTaskNextPollAt(input: { submittedAt?: number; consecutiveErrors?: number; now?: number; webhook?: boolean }) {
@@ -291,6 +306,7 @@ function mapLease(row: Record<string, unknown>): GenerationTaskLease {
         workerId: clean(row.worker_id, 160),
         leaseUntil: databaseTime(row.lease_until),
         lastHeartbeatAt: databaseTime(row.last_heartbeat_at),
+        runId: clean(row.run_id, 160),
     };
 }
 
