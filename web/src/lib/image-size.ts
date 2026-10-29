@@ -21,7 +21,7 @@ export function extractImageSizeFromPrompt(prompt: string) {
     const dimensions = prompt.match(/(?:^|[^\d])(\d{1,5})\s*(?:x|\*|×)\s*(\d{1,5})(?!\d)/i);
     if (dimensions) return normalizeImageSizeValue(`${dimensions[1]}x${dimensions[2]}`);
 
-    const ratio = prompt.match(/(?:比例|画幅|宽高比|尺寸)?\s*(?:为|是|[:：])?\s*(\d+(?:\.\d+)?)\s*[:：；;]\s*(\d+(?:\.\d+)?)/i);
+    const ratio = prompt.match(/(?:比例|画幅|宽高比|尺寸)?\s*(?:为|是|[:：])?\s*(\d+(?:\.\d+)?)\s*[:：；;]\s*(\d+(?:\.\d+)?)(?!\s*(?:还原|复刻|复制|一致|保持|对照|对应|参照|保真|同款|细节))/i);
     return ratio ? normalizeImageSizeValue(`${ratio[1]}:${ratio[2]}`) : "";
 }
 

@@ -13,6 +13,8 @@ describe("image size input", () => {
         expect(extractImageSizeFromPrompt("请按宽高比 9:16 生成竖版海报")).toBe("9:16");
         expect(extractImageSizeFromPrompt("生成9：16的小狗图")).toBe("9:16");
         expect(extractImageSizeFromPrompt("生成16；9横图")).toBe("16:9");
+        expect(extractImageSizeFromPrompt("严格1:1还原参考图中的服装款式")).toBe("");
+        expect(extractImageSizeFromPrompt("请按比例 1:1 生成商品主图")).toBe("1:1");
         expect(extractImageSizeFromPrompt("生成一张自然风格图片")).toBe("");
     });
 
