@@ -169,6 +169,21 @@ describe("directAgentPlan", () => {
         expect(task).toMatchObject({ type: "image", ratio: "16:9", quality: "high", count: 4 });
     });
 
+    it("统一 Agent 的用户选择尺寸优先于提示词中的方向描述", () => {
+        const plan = {
+            intent: "generation",
+            objective: "生成方图头像",
+            reply: "开始生成",
+            decisions: [],
+            foundation: { complexity: "simple", brief: { objective: "生成方图头像" }, direction: { summary: "方形构图" } },
+            deliverables: [{ id: "avatar", title: "头像", type: "image", model: "image-pro", prompt: "方图头像", count: 1, ratio: "1:1", dependencies: [] }],
+        };
+
+        const [task] = normalizeTasks(plan as never, [], generationSettings() as never, undefined, "生成方图头像", "chat", [], undefined, { mode: "image", image: { size: "3:4" } });
+
+        expect(task.ratio).toBe("3:4");
+    });
+
     it("统一 Agent 的智能参数使用规划结果且不回退全局 1:1", () => {
         const plan = {
             intent: "generation",
